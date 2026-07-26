@@ -253,17 +253,27 @@ This is often the trickiest part. There are 3 approaches:
 - Also: same long URL → same short URL (deduplication, could be a feature or bug)
 
 #### Approach C: Unique ID Generator → Base62 Encode ✅ (Best)
-- Use a **distributed ID generator** (like Twitter Snowflake) to get a unique 64-bit integer
-- Convert that integer to Base62 (7 chars)
-- No collision possible. No DB check needed.
+- Base62 character set: `[a-z, A-Z, 0-9]` (62 unique characters).
+- 7 characters can hold: $62^7 = 3,521,614,606,208 \approx \mathbf{3.52 \text{ trillion unique IDs}}$.
+- **Important Bit-Length Math**:
+  - $3.52 \text{ trillion} \approx 2^{41.67}$ (fits in a **41-bit or 42-bit integer**).
+  - A standard 64-bit Snowflake ID (up to $2^{64}-1 \approx 18.4 \text{ quintillion}$) produces **10–11 Base62 characters**.
+- **To support 2,000+ writes/sec while maintaining strictly $\le 7$ Base62 characters**:
 
-```
-Snowflake ID (64-bit integer) = timestamp(41) + machine_id(10) + sequence(12)
-→ Convert to Base62
-→ e.g., 1234567890 → "1LY7VK"
-```
+  1. **Option 1: Range-based Key Generation Service (KGS + ZooKeeper) — Recommended ✅**:
+     - **Why it handles uneven traffic effortlessly**:
+       - Central ZooKeeper allocates ranges (e.g. Server 1 gets `1–1,000,000`, Server 2 gets `1,001,000–2,000,000`).
+       - If traffic is uneven (e.g. Server 1 gets 90% of requests and Server 2 gets 10%), Server 1 simply consumes its 1M IDs faster and requests a new range (`2,000,001–3,000,000`).
+       - **No per-second rate limit per server, no sequence overflow risk, and no dependence on even load balancing**.
+     - Converts any assigned numeric ID $\le 3.52 \text{ trillion}$ into **strictly $\le 7$ Base62 characters**.
+     - If a server node crashes, its unassigned in-memory sub-range is discarded; new IDs continue from next block (harmless gap).
 
-**Alternative**: Use a **counter + range allocation**. Each URL Creation Service instance is pre-allocated a range (e.g., 1–1M). It uses IDs from its range locally. No coordination needed during creation.
+  2. **Option 2: Custom 42-bit Timestamp ID (Suffers from Uneven Traffic Flaw ⚠️)**:
+     - **31 bits**: Timestamp in seconds (~68 years from custom epoch).
+     - **4 bits**: Worker / Machine ID (16 server nodes).
+     - **7 bits**: Sequence counter per second ($2^7 = 128$ IDs/sec per node).
+     - **Drawback / Flaw**: If load balancer traffic is uneven and 1 server receives a burst of >128 req/sec, its 7-bit counter overflows during that second!
+     - *Conclusion*: **Option 1 (Range-based KGS)** is vastly superior in real-world production.
 
 ---
 
