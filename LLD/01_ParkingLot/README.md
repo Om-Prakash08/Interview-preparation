@@ -1,123 +1,169 @@
-# 01. Parking Lot System (Java LLD Solution)
+# 01. Parking Lot System — LLD Interview Guide
 
-This folder contains a complete, thread-safe Java implementation of a Parking Lot System. 
-
-Below is the **Complete Class Skeleton and API Design** so you can understand the entire system architecture, fields, and method signatures without looking at the source code.
+> **Framework:** Requirements → Entities → Class Design → Implementation → Extensibility
 
 ---
 
-## 1. Class Diagram / Architecture Skeleton
+## ① Requirements (Clarify First!)
 
-### Enums
-```java
-public enum VehicleType { MOTORCYCLE, CAR, TRUCK, VAN }
-public enum ParkingSpotType { MOTORCYCLE, COMPACT, LARGE }
+> *"Before I write any code, let me confirm the scope."*
+
+**Functional Requirements:**
+- Support multiple vehicle types: `Motorcycle`, `Car`, `Truck`, `Van`
+- Parking lot has multiple **Levels**, each with multiple **Spots** of different sizes
+- Entrance gate: issue a **Ticket** when a vehicle parks
+- Exit gate: calculate **fee** and process **payment**, then free the spot
+- Match vehicle to the **nearest compatible spot** on entry
+
+**Non-Functional Requirements:**
+- **Thread-safe**: multiple entrance/exit gates operate concurrently
+- **Singleton** parking lot — single point of coordination
+- Fee strategy and payment method must be **swappable** (Strategy Pattern)
+
+**Out of Scope (for this interview):**
+- Online reservation / pre-booking
+- Real-time GUI or sensor integration
+
+---
+
+## ② Entities (Nouns → Classes)
+
+> *"I'll identify the key nouns in the problem to define my classes."*
+
+| Entity | Type | Responsibility |
+|---|---|---|
+| `VehicleType` | Enum | `MOTORCYCLE, CAR, TRUCK, VAN` |
+| `ParkingSpotType` | Enum | `MOTORCYCLE, COMPACT, LARGE` |
+| `Vehicle` | Abstract Class | Holds `licensePlate` + `VehicleType` |
+| `Car / Motorcycle / Truck / Van` | Concrete | Extends `Vehicle` |
+| `ParkingSpot` | Class | Tracks occupancy + vehicle reference |
+| `Level` | Class | Contains list of `ParkingSpot`s |
+| `Ticket` | Class | Entry record: vehicle, spot, entryTime, amount |
+| `ParkingLot` | Singleton | Orchestrates levels, issues/releases tickets |
+
+---
+
+## ③ Class Design (Design Patterns)
+
+> *"I'll highlight the design patterns used and why."*
+
+### 🔷 Strategy Pattern — Fee & Payment
 ```
+FeeCalculator (interface)
+    └── HourlyFeeCalculator
 
-### Strategy Pattern (Pricing & Payments)
-```java
-public interface FeeCalculator {
-    double calculateFee(LocalDateTime start, LocalDateTime end, VehicleType type);
-}
-
-public class HourlyFeeCalculator implements FeeCalculator {
-    @Override
-    public double calculateFee(LocalDateTime start, LocalDateTime end, VehicleType type) { ... }
-}
-
-public interface PaymentStrategy {
-    void processPayment(double amount);
-}
-
-public class CreditCardPayment implements PaymentStrategy { ... }
-public class MobileWalletPayment implements PaymentStrategy { ... }
+PaymentStrategy (interface)
+    ├── CreditCardPayment
+    └── MobileWalletPayment
 ```
+**Why?** Decouples pricing rules and payment methods from the core domain. Adding a new payment type requires zero changes to `ParkingLot`.
 
-### Core Entities
+### 🔷 Singleton — ParkingLot
 ```java
-// Lombok getter handles field reads, constructors are mapped
-@Getter
+@Synchronized public static ParkingLot getInstance();
+```
+**Why?** One central coordinator manages all levels and tickets.
+
+### 🔷 Class Skeleton
+```java
+public enum VehicleType    { MOTORCYCLE, CAR, TRUCK, VAN }
+public enum ParkingSpotType{ MOTORCYCLE, COMPACT, LARGE  }
+
 public abstract class Vehicle {
     private final String licensePlate;
     private final VehicleType type;
 }
 
-class Car extends Vehicle { public Car(String lp) { super(lp, VehicleType.CAR); } }
-class Motorcycle extends Vehicle { public Motorcycle(String lp) { super(lp, VehicleType.MOTORCYCLE); } }
-class Truck extends Vehicle { public Truck(String lp) { super(lp, VehicleType.TRUCK); } }
-class Van extends Vehicle { public Van(String lp) { super(lp, VehicleType.VAN); } }
-
 public class ParkingSpot {
-    @Getter private final String spotId;
-    @Getter private final ParkingSpotType type;
+    private final String spotId;
+    private final ParkingSpotType type;
     private boolean isFree;
     private Vehicle vehicle;
 
-    @Synchronized public boolean isFree();
-    @Synchronized public Vehicle getVehicle();
     @Synchronized public boolean park(Vehicle v);
     @Synchronized public void removeVehicle();
 }
 
 public class Level {
-    @Getter private final String levelId;
+    private final String levelId;
     private final List<ParkingSpot> spots;
 
-    public List<ParkingSpot> getSpots(); // returns unmodifiable list
     @Synchronized public ParkingSpot parkVehicle(Vehicle v);
     @Synchronized public void freeSpot(ParkingSpot spot);
 }
 
-@Getter
 public class Ticket {
     private final String ticketId;
     private final Vehicle vehicle;
     private final ParkingSpot parkingSpot;
-    private final String levelId;
     private final LocalDateTime entryTime;
     private LocalDateTime exitTime;
     private double amount;
-    private TicketStatus status; // ACTIVE, PAID
 
     @Synchronized public void pay(double amount);
 }
 
 public class ParkingLot {
-    @Getter private final String name;
     private final List<Level> levels;
     private final FeeCalculator feeCalculator;
 
     @Synchronized public static ParkingLot getInstance();
-    @Synchronized public void addLevel(Level level);
-    @Synchronized public List<Level> getLevels();
-    @Synchronized public Ticket issueTicket(Vehicle vehicle); // Match nearest spot & issue ticket
-    @Synchronized public double releaseVehicle(Ticket ticket, PaymentStrategy payment); // Free spot & process payment
+    @Synchronized public Ticket issueTicket(Vehicle vehicle);
+    @Synchronized public double releaseVehicle(Ticket ticket, PaymentStrategy payment);
 }
 ```
 
 ---
 
-## 2. Core Workflow & Usage
+## ④ Implementation (Core Workflow)
 
-Here is how the API is initialized and coordinated:
+> *"Let me walk through the key flows end to end."*
 
+### Entry Flow
 ```java
-// 1. Initialize Singleton Parking Lot
 ParkingLot lot = ParkingLot.getInstance("FAANG Lot");
-Level level1 = new Level("Level_1", 10);
-lot.addLevel(level1);
+lot.addLevel(new Level("L1", 10));
 
-// 2. Issue Ticket at Entrance Gate (Thread-Safe Proximity Allocation)
 Vehicle car = new Car("CAR-1234");
-Ticket ticket = lot.issueTicket(car); // Auto-allocates Level_1 COMPACT/LARGE spot
+Ticket ticket = lot.issueTicket(car);
+// → Scans levels, finds nearest COMPACT/LARGE spot, parks vehicle, returns Ticket
+```
 
-// 3. Process Exit Gate Payment & Release Spot
-lot.releaseVehicle(ticket, new MobileWalletPayment("+1-555-0199"));
+### Exit Flow
+```java
+lot.releaseVehicle(ticket, new MobileWalletPayment("+91-9999"));
+// → Calculates fee (HourlyFeeCalculator), processes payment, frees the spot
+```
+
+### Spot Matching Logic (inside `Level`)
+```
+for each spot in spots:
+    if spot.isFree() && spot.type compatible with vehicle.type:
+        spot.park(vehicle)
+        return spot
 ```
 
 ---
 
-## 3. Concurrency & Thread-Safety Details
-- **Gates Locking**: The entrance and exit gates in `ParkingLot` are fully synchronized (`@Synchronized`), guaranteeing that concurrent vehicles entering the lot do not read/claim the same empty spot.
-- **Spot Locking**: Individual `ParkingSpot` actions (`park`, `removeVehicle`) are synchronized to secure the spot state variables.
-- **Level Proximity Loop**: `Level` spot scanning is thread-safe (`@Synchronized`), preventing thread collision during proximity matching.
+## ⑤ Extensibility (Impress the Interviewer)
+
+> *"Here's how this design handles future changes cleanly."*
+
+| Future Requirement | How to Handle |
+|---|---|
+| Add monthly subscription pricing | Implement new `MonthlyFeeCalculator implements FeeCalculator` |
+| Add crypto payment | Implement `CryptoPayment implements PaymentStrategy` |
+| Add EV charging spots | Add `EV_CHARGING` to `ParkingSpotType` enum |
+| Add spot reservation | Add `reserve()` on `ParkingSpot`, pre-booking logic in `ParkingLot` |
+| Multi-location parking chain | `ParkingLotNetwork` aggregates multiple `ParkingLot` Singletons |
+
+---
+
+## 🔐 Thread-Safety Summary
+
+| Component | Mechanism | Why |
+|---|---|---|
+| `ParkingLot.issueTicket` | `@Synchronized` | Prevent two gates grabbing same spot |
+| `ParkingSpot.park` | `@Synchronized` | Atomic occupy check-and-set |
+| `Level.parkVehicle` | `@Synchronized` | Prevent concurrent spot scan collision |
+| `Ticket.pay` | `@Synchronized` | Prevent double payment race |

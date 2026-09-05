@@ -1,32 +1,75 @@
-# 05. Vending Machine (Java LLD Solution)
+# 05. Vending Machine — LLD Interview Guide
 
-This folder contains a complete Java implementation of a Vending Machine System.
-
-Below is the **Complete Class Skeleton and API Design** so you can understand the entire system architecture, fields, and method signatures without looking at the source code.
+> **Framework:** Requirements → Entities → Class Design → Implementation → Extensibility
 
 ---
 
-## 1. Class Diagram / Architecture Skeleton
+## ① Requirements (Clarify First!)
 
-### Data Models & Enums
+> *"Before I write any code, let me confirm the scope."*
+
+**Functional Requirements:**
+- Accept coins (Nickel, Dime, Quarter, Dollar)
+- Display product catalog with codes and prices
+- Select a product by code; validate sufficient deposit
+- Dispense product and return change
+- Cancel transaction at any time and refund coins
+- Admin can restock products
+
+**Non-Functional Requirements:**
+- **Thread-safe**: Physical machines may have concurrent button presses
+- Machine behavior changes based on internal **state** — use State Pattern
+- Prevent double-dispensing under concurrent operations
+
+**Out of Scope:**
+- Card / contactless payments (can extend via new State)
+- Network-connected machine management
+
+---
+
+## ② Entities (Nouns → Classes)
+
+> *"I'll identify the key nouns to define my classes."*
+
+| Entity | Type | Responsibility |
+|---|---|---|
+| `Coin` | Enum | `NICKEL(0.05), DIME(0.10), QUARTER(0.25), DOLLAR(1.00)` |
+| `Product` | Class | Name + price |
+| `Inventory` | Class | Map of product codes → (Product, quantity) |
+| `State` | Interface | Actions: `insertCoin`, `selectProduct`, `dispenseProduct`, `refund` |
+| `IdleState` | Concrete State | No coin inserted; ready to accept coins |
+| `HasMoneyState` | Concrete State | Coin(s) inserted; waiting for product selection |
+| `DispenseState` | Concrete State | Product selected & deposit sufficient; ready to dispense |
+| `VendingMachine` | Context | Holds current state; exposes synchronized client API |
+
+---
+
+## ③ Class Design (Design Patterns)
+
+> *"I'll highlight the design patterns used and why."*
+
+### 🔷 State Pattern — Core Design
+```
+State (interface)
+    ├── IdleState       → accepts coins; ignores other actions
+    ├── HasMoneyState   → selects product; returns change on cancel
+    └── DispenseState   → dispenses product; returns to IdleState
+
+VendingMachine (Context)
+    ├── holds: idleState, hasMoneyState, dispenseState
+    ├── currentState → switches between above
+    ├── deposit (double)
+    └── selectedProductCode (String)
+```
+**Why?** Without State Pattern, you'd have massive `if-else` chains checking machine mode in every method. State Pattern makes each mode's behavior self-contained and independently testable.
+
+### 🔷 Class Skeleton
 ```java
-@Getter
-@AllArgsConstructor
 public enum Coin {
     NICKEL(0.05), DIME(0.10), QUARTER(0.25), DOLLAR(1.00);
     private final double value;
 }
 
-@Getter
-@AllArgsConstructor
-public class Product {
-    private final String name;
-    private final double price;
-}
-```
-
-### State Design Pattern (State Interfaces & Concrete States)
-```java
 public interface State {
     void insertCoin(Coin coin);
     void selectProduct(String code);
@@ -34,74 +77,93 @@ public interface State {
     void refund();
 }
 
-public class IdleState implements State { ... }
+public class IdleState     implements State { ... }
 public class HasMoneyState implements State { ... }
 public class DispenseState implements State { ... }
-```
 
-### Inventory & Context (Vending Machine)
-```java
 public class Inventory {
     public void addProduct(String code, Product product, int quantity);
-    public Product getProduct(String code);
-    public int getQuantity(String code);
-    public void deductQuantity(String code);
     public boolean hasProduct(String code);
+    public void deductQuantity(String code);
 }
 
 public class VendingMachine {
-    @Getter private final Inventory inventory;
-    @Getter private final State idleState;
-    @Getter private final State hasMoneyState;
-    @Getter private final State dispenseState;
-
     private State currentState;
-    private double deposit = 0.0;
-    private String selectedProductCode = null;
+    private double deposit;
+    private String selectedProductCode;
 
-    @Synchronized public void setState(State state);
-    @Synchronized public State getCurrentState();
-    @Synchronized public double getDeposit();
-    @Synchronized public void addDeposit(double amount);
-    @Synchronized public void clearDeposit();
-    @Synchronized public String getSelectedProductCode();
-    @Synchronized public void setSelectedProductCode(String code);
-
-    // Client delegates (Thread-Safe Wrapper Interface)
-    @Synchronized public void insertCoin(Coin coin);
-    @Synchronized public void selectProduct(String code);
-    @Synchronized public void dispense();
-    @Synchronized public void cancelTransaction();
+    @Synchronized public void insertCoin(Coin coin);       // Delegates to currentState
+    @Synchronized public void selectProduct(String code);  // Delegates to currentState
+    @Synchronized public void dispense();                  // Delegates to currentState
+    @Synchronized public void cancelTransaction();         // Delegates to currentState
 }
 ```
 
 ---
 
-## 2. Core Workflow & Usage
+## ④ Implementation (Core Workflow)
 
-Here is how the State Pattern handles machine operations:
+> *"Let me walk through the key flows end to end."*
 
+### Happy Path (Buy a Product)
 ```java
 VendingMachine machine = new VendingMachine();
 
-// 1. Setup Inventory
-Product coke = new Product("Coke", 1.50);
-machine.getInventory().addProduct("A1", coke, 5);
+// Setup
+machine.getInventory().addProduct("A1", new Product("Coke", 1.50), 5);
 
-// 2. Insert cash (Idle -> HasMoneyState)
-machine.insertCoin(Coin.DOLLAR);
-machine.insertCoin(Coin.QUARTER);
-machine.insertCoin(Coin.QUARTER); // Deposit: $1.50
+// Step 1: Insert coins → IdleState → HasMoneyState
+machine.insertCoin(Coin.DOLLAR);   // deposit = 1.00
+machine.insertCoin(Coin.QUARTER);  // deposit = 1.25
+machine.insertCoin(Coin.QUARTER);  // deposit = 1.50
 
-// 3. Select Product (HasMoneyState -> DispenseState)
+// Step 2: Select product → HasMoneyState → DispenseState
 machine.selectProduct("A1");
+// Checks: deposit (1.50) >= product price (1.50) ✓
+// Transitions to DispenseState
 
-// 4. Dispense Product (DispenseState -> IdleState)
+// Step 3: Dispense → DispenseState → IdleState
 machine.dispense();
+// Deducts inventory, returns change (0.00), resets deposit, back to Idle
+```
+
+### Cancel / Refund Path
+```java
+machine.insertCoin(Coin.DOLLAR);  // deposit = 1.00
+machine.cancelTransaction();
+// → HasMoneyState.refund() → prints "Returning $1.00" → resets → IdleState
+```
+
+### State Transition Diagram
+```
+[IdleState] ──insertCoin()──► [HasMoneyState] ──selectProduct() & deposit≥price──► [DispenseState]
+    ▲                               │                                                      │
+    │                         cancelTransaction()                                    dispense()
+    │                               │                                                      │
+    └───────────────────────────────┴──────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 3. Concurrency & Thread-Safety Details
-- **Double Dispensing Prevention**: The client-facing delegates in `VendingMachine` (`insertCoin`, `selectProduct`, `dispense`, `cancelTransaction`) are fully synchronized (`@Synchronized`), ensuring that multiple users pressing buttons concurrently do not double-dispense items or trigger concurrent refund allocations.
-- **Inventory Locking**: Modifying quantities and checking stock levels are safeguarded inside the synchronized inventory context.
+## ⑤ Extensibility (Impress the Interviewer)
+
+> *"Here's how this design handles future changes cleanly."*
+
+| Future Requirement | How to Handle |
+|---|---|
+| Card payment support | Add `CardPaymentState`, transition after `insertCard()` |
+| Display screen messages | Add `display(String msg)` to `VendingMachine`, call from each State |
+| Low stock alerts | Add observer in `Inventory.deductQuantity()` |
+| Multiple product rows | Extend `Inventory` to support row/column codes (A1-D9) |
+| Admin restock mode | Add `AdminState implements State` |
+
+---
+
+## 🔐 Thread-Safety Summary
+
+| Component | Mechanism | Why |
+|---|---|---|
+| `VendingMachine.insertCoin` | `@Synchronized` | Prevent two threads adding coins simultaneously |
+| `VendingMachine.dispense` | `@Synchronized` | Prevent double-dispense race condition |
+| `VendingMachine.selectProduct` | `@Synchronized` | Atomic deposit check + state transition |
+| `Inventory.deductQuantity` | Called inside synchronized context | Safe stock decrement |

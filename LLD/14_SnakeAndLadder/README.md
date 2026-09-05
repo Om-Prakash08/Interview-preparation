@@ -1,106 +1,192 @@
-# 14. Snake & Ladder Game (Java LLD Solution)
+# 14. Snake & Ladder Game — LLD Interview Guide
 
-This folder contains a complete Java implementation of a Snake & Ladder Game.
-
-Below is the **Complete Class Skeleton and API Design** so you can understand the entire system architecture, fields, and method signatures without looking at the source code.
+> **Framework:** Requirements → Entities → Class Design → Implementation → Extensibility
 
 ---
 
-## 1. Class Diagram / Architecture Skeleton
+## ① Requirements (Clarify First!)
 
-### Utility & Layout Elements
+> *"Before I write any code, let me confirm the scope."*
+
+**Functional Requirements:**
+- 100-cell board with configurable snakes and ladders
+- 2+ players take turns rolling dice and moving their token
+- **Snake head** → player slides to snake tail (lower position)
+- **Ladder start** → player climbs to ladder end (higher position)
+- First player to reach **exactly position 100** wins
+- Support **multiple dice** (sum of all dice rolled each turn)
+- Track leaderboard — players who reach 100 are ranked in order
+
+**Non-Functional Requirements:**
+- **Thread-safe** turns (safe for future multiplayer server mode)
+- Configurable board (number of snakes/ladders, board size)
+- Recursive jump resolution (snake at tail of another snake, etc.)
+
+**Out of Scope:**
+- Graphical board rendering
+- Network multiplayer
+- Dice rolling animation
+
+---
+
+## ② Entities (Nouns → Classes)
+
+> *"I'll identify the key nouns to define my classes."*
+
+| Entity | Type | Responsibility |
+|---|---|---|
+| `Dice` | Class | Rolls `n` dice; returns sum in `[n, n×6]` |
+| `Snake` | Class | head (int) + tail (int); validates head > tail |
+| `Ladder` | Class | start (int) + end (int); validates start < end |
+| `Player` | Class | id, name, position (thread-safe) |
+| `Board` | Class | Size, Map of snakes, Map of ladders; `getNextPosition()` |
+| `Game` | Class | board, dice, player queue, leaderboard; `playTurn()` |
+
+---
+
+## ③ Class Design (Design Patterns)
+
+> *"I'll highlight the design patterns used and why."*
+
+### 🔷 Queue for Turn Management
+```
+players: Queue<Player>  (circular turn order)
+→ Each turn: poll() → play → if not winner: offer() back to queue
+→ If winner: add to leaderboard, do NOT offer() back
+```
+**Why?** Queue naturally models round-robin turn order. When a player wins, they exit the queue.
+
+### 🔷 Recursive Jump Resolution — Board
 ```java
-public class Dice {
-    public Dice(int numberOfDice);
-    public int roll(); // Returns random sum in range [numDice, numDice * 6]
-}
-
-@Getter
-public class Snake {
-    private final int head;
-    private final int tail;
-
-    public Snake(int head, int tail); // Validates head > tail
-}
-
-@Getter
-public class Ladder {
-    private final int start;
-    private final int end;
-
-    public Ladder(int start, int end); // Validates start < end
+public int getNextPosition(int currentPos) {
+    if (snakes.containsKey(currentPos)) {
+        System.out.println("Snake! " + currentPos + " → " + snakes.get(currentPos).getTail());
+        return getNextPosition(snakes.get(currentPos).getTail()); // Recursive
+    }
+    if (ladders.containsKey(currentPos)) {
+        System.out.println("Ladder! " + currentPos + " → " + ladders.get(currentPos).getEnd());
+        return getNextPosition(ladders.get(currentPos).getEnd()); // Recursive
+    }
+    return currentPos; // Stable position
 }
 ```
+**Why recursion?** If a ladder end lands on a snake head (or vice versa), the resolution chain continues automatically.
 
-### Players & Board Configuration
+### 🔷 Class Skeleton
 ```java
-public class Player {
-    @Getter private final String id;
-    @Getter private final String name;
-    private int position;
+public class Dice {
+    private final int numberOfDice;
+    public int roll(); // Random sum: [numDice, numDice × 6]
+}
 
-    public Player(String id, String name);
+public class Snake {
+    private final int head, tail; // head > tail (going down)
+}
+
+public class Ladder {
+    private final int start, end; // start < end (going up)
+}
+
+public class Player {
+    private final String id, name;
+    private int position; // 0 = start, 100 = win
+
     @Synchronized public int getPosition();
     @Synchronized public void setPosition(int position);
 }
 
 public class Board {
-    @Getter private final int size;
-    private final Map<Integer, Snake> snakes;
+    private final int size;
+    private final Map<Integer, Snake>  snakes;
     private final Map<Integer, Ladder> ladders;
 
-    public Board(int size);
     public void addSnake(Snake snake);
     public void addLadder(Ladder ladder);
-    public int getNextPosition(int currentPos); // Iterates snakes and ladders recursively until stable
+    public int getNextPosition(int currentPos); // Recursive resolution
 }
-```
 
-### Game Core Context & Queue
-```java
 public class Game {
     private final Board board;
     private final Dice dice;
     private final Queue<Player> players;
-    @Getter private final List<Player> leaderboard;
+    private final List<Player> leaderboard;
     private boolean isGameOver;
 
-    public Game(Board board, Dice dice, List<Player> playerList);
-
-    @Synchronized public void playTurn(); // Rolls dice, updates position, checks winner, shifts turn
+    @Synchronized public void playTurn();
     @Synchronized public boolean isGameOver();
 }
 ```
 
 ---
 
-## 2. Core Workflow & Usage
+## ④ Implementation (Core Workflow)
 
-Here is how the game state loop is coordinated:
+> *"Let me walk through the key flows end to end."*
 
+### Setup
 ```java
-// 1. Setup board
 Board board = new Board(100);
-board.addSnake(new Snake(14, 7));
-board.addSnake(new Snake(99, 5));
-board.addLadder(new Ladder(3, 22));
-board.addLadder(new Ladder(24, 60));
 
-// 2. Setup players
+// Add snakes (head > tail = slide DOWN)
+board.addSnake(new Snake(14, 7));   // Land on 14 → go to 7
+board.addSnake(new Snake(99, 5));   // Land on 99 → go to 5
+
+// Add ladders (start < end = climb UP)
+board.addLadder(new Ladder(3, 22));  // Land on 3 → jump to 22
+board.addLadder(new Ladder(24, 60)); // Land on 24 → jump to 60
+
 Player alice = new Player("p1", "Alice");
-Player bob = new Player("p2", "Bob");
-Game game = new Game(board, new Dice(1), Arrays.asList(alice, bob));
+Player bob   = new Player("p2", "Bob");
 
-// 3. Play turns until game finishes
+Game game = new Game(board, new Dice(1), Arrays.asList(alice, bob));
+```
+
+### Game Loop
+```java
 while (!game.isGameOver()) {
     game.playTurn();
 }
+// playTurn() internal:
+// 1. player = players.poll()         ← dequeue front player
+// 2. roll = dice.roll()              ← e.g. 6
+// 3. newPos = player.position + roll ← 0 + 6 = 6
+// 4. if newPos > 100 → skip turn (overshoot, don't move)
+// 5. newPos = board.getNextPosition(newPos) ← resolve snakes/ladders
+// 6. player.setPosition(newPos)
+// 7. if newPos == 100 → leaderboard.add(player) → game over check
+// 8. else → players.offer(player)    ← re-enqueue for next turn
+
 System.out.println("Winner: " + game.getLeaderboard().get(0).getName());
+```
+
+### Example Turn Trace
+```
+Alice (pos=0) rolls 3 → pos=3 → Ladder! 3→22 → pos=22
+Bob   (pos=0) rolls 14 → pos=14 → Snake! 14→7 → pos=7
+Alice (pos=22) rolls 2 → pos=24 → Ladder! 24→60 → pos=60
+...
 ```
 
 ---
 
-## 3. Concurrency & Thread-Safety Details
-- **Turn Sequence Safety**: The `playTurn` method in `Game` is fully synchronized (`@Synchronized`), preventing race conditions in multiplayer environments (e.g. players rolling dice out of turn order).
-- **Atomic Position Tracking**: The player position is managed with synchronized getters and setters (`@Synchronized`), ensuring accurate rendering of positions during telemetry queries.
-- **Stable Board Resolution**: The recursive calculation of jumps (snakes and ladders) in `Board` is pure, which keeps the resolution deterministic and safe from memory inconsistencies.
+## ⑤ Extensibility (Impress the Interviewer)
+
+> *"Here's how this design handles future changes cleanly."*
+
+| Future Requirement | How to Handle |
+|---|---|
+| Multiple dice | `new Dice(2)` — `roll()` already sums N dice |
+| Power cards (skip turn) | Add `PowerCard` entity, draw on landing specific cells |
+| Save/resume game | Serialize `Queue<Player>` state and board config |
+| Web multiplayer | Add `GameSession` wrapper; `playTurn()` called via REST API |
+| Undo last move | Store previous position in `Player`; `undoTurn()` in `Game` |
+
+---
+
+## 🔐 Thread-Safety Summary
+
+| Component | Mechanism | Why |
+|---|---|---|
+| `Game.playTurn()` | `@Synchronized` | Prevent two players taking turns simultaneously |
+| `Game.isGameOver()` | `@Synchronized` | Consistent read of game state |
+| `Player.getPosition / setPosition` | `@Synchronized` | Safe position updates in multiplayer server |
