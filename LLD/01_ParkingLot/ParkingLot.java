@@ -23,11 +23,6 @@ public class ParkingLot {
         return instance;
     }
 
-    public static synchronized ParkingLot getInstance() {
-        if (instance == null) instance = new ParkingLot("FAANG Headquarter Parking Lot");
-        return instance;
-    }
-
     public synchronized void addLevel(Level level) {
         levels.add(level);
     }

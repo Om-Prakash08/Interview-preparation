@@ -21,8 +21,8 @@ public class Level {
     }
 
     private void initializeSpots(int numSpots) {
-        int smallSpots = numSpots / 5;
-        int mediumSpots = (numSpots * 3) / 5;
+        int smallSpots = numSpots /3 ;
+        int mediumSpots = numSpots/3;
         int largeSpots = numSpots - smallSpots - mediumSpots;
 
         for (int i = 1; i <= smallSpots; i++) spots.add(new SmallSpot(levelId + "-S" + i));
