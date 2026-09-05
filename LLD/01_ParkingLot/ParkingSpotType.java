@@ -1,8 +1,7 @@
 package parkinglot;
 
 public enum ParkingSpotType {
-    MOTORCYCLE,
-    COMPACT,
-    LARGE,
-    HANDICAPPED
+    SMALL,
+    MEDIUM,
+    LARGE
 }

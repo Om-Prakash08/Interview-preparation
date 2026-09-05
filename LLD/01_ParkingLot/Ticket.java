@@ -1,15 +1,9 @@
 package parkinglot;
 
-import lombok.Getter;
-import lombok.Synchronized;
 import java.time.LocalDateTime;
 
-@Getter
 public class Ticket {
-    public enum TicketStatus {
-        ACTIVE,
-        PAID
-    }
+    public enum TicketStatus { ACTIVE, PAID }
 
     private final String ticketId;
     private final Vehicle vehicle;
@@ -29,8 +23,16 @@ public class Ticket {
         this.status = TicketStatus.ACTIVE;
     }
 
-    @Synchronized
-    public void pay(double amount) {
+    public String getTicketId()           { return ticketId; }
+    public Vehicle getVehicle()           { return vehicle; }
+    public ParkingSpot getParkingSpot()   { return parkingSpot; }
+    public String getLevelId()            { return levelId; }
+    public LocalDateTime getEntryTime()   { return entryTime; }
+    public LocalDateTime getExitTime()    { return exitTime; }
+    public double getAmount()             { return amount; }
+    public TicketStatus getStatus()       { return status; }
+
+    public synchronized void pay(double amount) {
         this.amount = amount;
         this.exitTime = LocalDateTime.now();
         this.status = TicketStatus.PAID;

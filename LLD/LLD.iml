@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<module type="JAVA_MODULE" version="4">
+  <component name="NewModuleRootManager" inherit-compiler-output="true">
+    <exclude-output />
+    <content url="file://$MODULE_DIR$">
+      <sourceFolder url="file://$MODULE_DIR$/01_ParkingLot" isTestSource="false" packagePrefix="parkinglot" />
+      <sourceFolder url="file://$MODULE_DIR$/02_ElevatorSystem" isTestSource="false" packagePrefix="elevator" />
+      <sourceFolder url="file://$MODULE_DIR$/03_LibraryManagementSystem" isTestSource="false" packagePrefix="library" />
+      <sourceFolder url="file://$MODULE_DIR$/04_ChessGame" isTestSource="false" packagePrefix="chess" />
+      <sourceFolder url="file://$MODULE_DIR$/05_VendingMachine" isTestSource="false" packagePrefix="vending" />
+      <sourceFolder url="file://$MODULE_DIR$/06_ATM" isTestSource="false" packagePrefix="atm" />
+      <sourceFolder url="file://$MODULE_DIR$/07_HotelBookingSystem" isTestSource="false" packagePrefix="hotel" />
+      <sourceFolder url="file://$MODULE_DIR$/08_LRUCache" isTestSource="false" packagePrefix="cache" />
+      <sourceFolder url="file://$MODULE_DIR$/09_LoggerFramework" isTestSource="false" packagePrefix="logger" />
+      <sourceFolder url="file://$MODULE_DIR$/10_Splitwise" isTestSource="false" packagePrefix="splitwise" />
+      <sourceFolder url="file://$MODULE_DIR$/11_RideBookingSystem" isTestSource="false" packagePrefix="uber" />
+      <sourceFolder url="file://$MODULE_DIR$/12_MovieTicketBooking" isTestSource="false" packagePrefix="booking" />
+      <sourceFolder url="file://$MODULE_DIR$/13_OnlineShoppingCart" isTestSource="false" packagePrefix="shop" />
+      <sourceFolder url="file://$MODULE_DIR$/14_SnakeAndLadder" isTestSource="false" packagePrefix="game" />
+      <sourceFolder url="file://$MODULE_DIR$/15_FileSystem" isTestSource="false" packagePrefix="fs" />
+    </content>
+    <orderEntry type="inheritedJdk" />
+    <orderEntry type="sourceFolder" forTests="false" />
+    <orderEntry type="library" name="lombok" level="project" />
+  </component>
+</module>

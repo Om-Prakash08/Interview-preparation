@@ -1,14 +1,11 @@
 package parkinglot;
 
-import lombok.Getter;
-import lombok.Synchronized;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
 public class ParkingLot {
     private static ParkingLot instance;
-    @Getter
     private final String name;
     private final List<Level> levels;
     private final FeeCalculator feeCalculator;
@@ -19,34 +16,27 @@ public class ParkingLot {
         this.feeCalculator = new HourlyFeeCalculator();
     }
 
-    @Synchronized
-    public static ParkingLot getInstance(String name) {
-        if (instance == null) {
-            instance = new ParkingLot(name);
-        }
+    public String getName() { return name; }
+
+    public static synchronized ParkingLot getInstance(String name) {
+        if (instance == null) instance = new ParkingLot(name);
         return instance;
     }
 
-    @Synchronized
-    public static ParkingLot getInstance() {
-        if (instance == null) {
-            instance = new ParkingLot("FAANG Headquarter Parking Lot");
-        }
+    public static synchronized ParkingLot getInstance() {
+        if (instance == null) instance = new ParkingLot("FAANG Headquarter Parking Lot");
         return instance;
     }
 
-    @Synchronized
-    public void addLevel(Level level) {
+    public synchronized void addLevel(Level level) {
         levels.add(level);
     }
 
-    @Synchronized
-    public List<Level> getLevels() {
+    public synchronized List<Level> getLevels() {
         return new ArrayList<>(levels);
     }
 
-    @Synchronized
-    public Ticket issueTicket(Vehicle vehicle) {
+    public synchronized Ticket issueTicket(Vehicle vehicle) {
         for (Level level : levels) {
             ParkingSpot spot = level.parkVehicle(vehicle);
             if (spot != null) {
@@ -61,11 +51,8 @@ public class ParkingLot {
         return null;
     }
 
-    @Synchronized
-    public double releaseVehicle(Ticket ticket, PaymentStrategy paymentStrategy) {
-        if (ticket == null) {
-            return 0.0;
-        }
+    public synchronized double releaseVehicle(Ticket ticket, PaymentStrategy paymentStrategy) {
+        if (ticket == null) return 0.0;
         if (ticket.getStatus() == Ticket.TicketStatus.PAID) {
             System.out.printf("[Gate Out] Ticket %s has already been paid.%n", ticket.getTicketId());
             return 0.0;
