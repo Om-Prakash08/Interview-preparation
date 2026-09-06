@@ -11,15 +11,15 @@
 **Functional Requirements:**
 - Building has multiple **elevators** and multiple **floors**
 - Two types of requests:
-  - **External (Hall Call):** User presses UP/DOWN on a floor
+  - **External (Hall Call):** User presses UP/DOWN button on a floor
   - **Internal (Cabin Call):** User presses a floor button inside the elevator
 - A **Dispatcher** routes each request to the most suitable elevator
 - Each elevator runs on its own **background thread**, continuously scanning for requests
 
 **Non-Functional Requirements:**
-- **Concurrent**: Each elevator is an independent thread; dispatcher is thread-safe
+- **Concurrent**: Each elevator is an independent thread; requests are thread-safe
 - Algorithm: **LOOK/SCAN** — elevator services requests in current direction before reversing
-- Elevators should not busy-poll; they must **sleep** when idle and **wake up** on new requests
+- Elevators must **sleep** when idle and **wake up** on new requests (no busy-polling)
 
 **Out of Scope:**
 - Weight sensors / overload detection
@@ -35,7 +35,7 @@
 |---|---|---|
 | `Direction` | Enum | `UP, DOWN, IDLE` |
 | `Request` | Class | Holds `floor` + `Direction` (hall call) |
-| `Elevator` | Class (Runnable) | Owns floor request queues, runs LOOK algorithm |
+| `Elevator` | Class (Runnable) | Owns floor request arrays, runs LOOK algorithm |
 | `Dispatcher` | Class | Routes incoming requests to the best elevator |
 
 ---
@@ -51,15 +51,15 @@ Elevator implements Runnable
     ├── boolean[] downRequests (indexed by floor)
     └── run() → LOOK/SCAN loop (background thread)
 ```
-**Why?** Each elevator independently processes its own queue without a shared central scheduler. This is more scalable than a master-controller approach.
+**Why?** Each elevator independently processes its own queue without a shared central scheduler. More scalable than a master-controller approach.
 
 ### 🔷 Wait/Notify — Idle Elevator Sleep
 ```java
-// Inside Elevator.run() — idles when no requests
-synchronized(lockObj) { lockObj.wait(); }
+// Inside Elevator.run() — waits when no requests
+synchronized (this) { wait(); }
 
-// Dispatcher wakes it up on new request
-synchronized(lockObj) { lockObj.notifyAll(); }
+// addRequest() wakes it up on new request
+notifyAll();
 ```
 **Why?** Avoids busy-polling and wasted CPU cycles when the elevator is idle.
 
@@ -70,6 +70,10 @@ public enum Direction { UP, DOWN, IDLE }
 public class Request {
     private final int floor;
     private final Direction direction;
+
+    public Request(int floor, Direction direction) { ... }
+    public int getFloor()           { return floor; }
+    public Direction getDirection() { return direction; }
 }
 
 public class Elevator implements Runnable {
@@ -78,18 +82,19 @@ public class Elevator implements Runnable {
     private Direction direction;
     private final boolean[] upRequests;
     private final boolean[] downRequests;
-    private final Object lockObj = new Object();
 
-    @Synchronized("lockObj") public void addRequest(int floor, Direction dir);
-    @Synchronized("lockObj") public int getCurrentFloor();
+    public int getId()                          { return id; }
+    public synchronized int getCurrentFloor()   { return currentFloor; }
+    public synchronized Direction getDirection() { return direction; }
+    public synchronized void addRequest(int floor, Direction dir);
+
     @Override public void run(); // LOOK algorithm loop
 }
 
 public class Dispatcher {
     private final List<Elevator> elevators;
 
-    public void addElevator(Elevator elevator);
-    public void handleRequest(Request request); // Routes to closest compatible elevator
+    public void dispatch(Request request); // routes to best elevator by cost score
 }
 ```
 
@@ -101,40 +106,52 @@ public class Dispatcher {
 
 ### Setup & Start Threads
 ```java
-Dispatcher dispatcher = new Dispatcher();
 Elevator e1 = new Elevator(1, 10); // id=1, maxFloor=10
 Elevator e2 = new Elevator(2, 10);
 
-dispatcher.addElevator(e1);
-dispatcher.addElevator(e2);
-
-new Thread(e1).start(); // e1 starts LOOK loop, waits for requests
+new Thread(e1).start(); // starts LOOK loop, waits for requests
 new Thread(e2).start();
+
+Dispatcher dispatcher = new Dispatcher(List.of(e1, e2));
 ```
 
 ### Handle Hall Call (External)
 ```java
-dispatcher.handleRequest(new Request(3, Direction.UP));
-// → Dispatcher scores each elevator by |currentFloor - 3| + direction compatibility
-// → Assigns to closest available elevator, calls addRequest() + notifyAll()
+dispatcher.dispatch(new Request(3, Direction.UP));
+// → Scores each elevator by distance + direction compatibility
+// → Assigns to best elevator, calls addRequest() → notifyAll()
 ```
 
 ### Handle Cabin Call (Internal)
 ```java
-e1.addRequest(8, Direction.UP); // Passenger inside e1 wants floor 8
-// → Sets upRequests[8] = true, notifies e1's run() loop
+e1.addRequest(8, Direction.IDLE); // passenger inside e1 selects floor 8
+// → Sets upRequests[8] = true, notifies run() loop
 ```
 
 ### LOOK Algorithm (inside `Elevator.run()`)
 ```
 while running:
+    if IDLE → wait() until notifyAll()
+
     if going UP:
-        service all upRequests above currentFloor (in order)
-        if none → switch to DOWN
+        currentFloor++
+        if upRequests[currentFloor] → openDoor(), clear request
+        if no more requests above  → switch to DOWN
+        if no more requests below  → IDLE
+
     if going DOWN:
-        service all downRequests below currentFloor (in order)
-        if none → switch to IDLE → wait()
-    openDoor() → sleep 800ms
+        currentFloor--
+        if downRequests[currentFloor] → openDoor(), clear request
+        if no more requests below  → switch to UP
+        if no more requests above  → IDLE
+```
+
+### Dispatcher Cost Scoring
+```
+IDLE elevator        → cost = distance
+Moving TOWARDS request in same direction → cost = distance       (best)
+Moving TOWARDS request, opposite dir    → cost = distance + 5
+Already passed the floor               → cost = distance + 20   (worst)
 ```
 
 ---
@@ -145,11 +162,11 @@ while running:
 
 | Future Requirement | How to Handle |
 |---|---|
-| Priority/VIP elevator | Add `priority` field to `Request`, update Dispatcher scoring |
-| Emergency mode (fire) | Add `EmergencyState`, override `run()` to home to ground floor |
-| Dispatcher algorithm swap | Extract `DispatchStrategy` interface (Strategy Pattern) |
-| Capacity limits / overload | Add `currentLoad` field to `Elevator`, check before `addRequest` |
-| Multiple buildings | Wrap in `Building` class containing its own `Dispatcher` |
+| Priority/VIP requests | Add `priority` field to `Request`, update Dispatcher scoring |
+| Emergency mode (fire) | Add `EmergencyMode` state, override `run()` to home to ground floor |
+| Swap dispatch algorithm | Extract `DispatchStrategy` interface (Strategy Pattern) |
+| Capacity limits / overload | Add `currentLoad` to `Elevator`, check before `addRequest()` |
+| Multiple buildings | Wrap in `Building` class, each with its own `Dispatcher` |
 
 ---
 
@@ -157,7 +174,7 @@ while running:
 
 | Component | Mechanism | Why |
 |---|---|---|
-| `Elevator.addRequest` | `@Synchronized("lockObj")` | Protect request arrays from concurrent writes |
-| `Elevator.run()` (idle) | `lockObj.wait()` | Sleep without busy-polling |
-| `Dispatcher.handleRequest` | `lockObj.notifyAll()` | Wake correct elevator thread on new request |
-| `getCurrentFloor / getDirection` | `@Synchronized("lockObj")` | Consistent reads for dispatcher scoring |
+| `Elevator.addRequest()` | `synchronized` method | Protect request arrays from concurrent writes |
+| `Elevator.run()` idle wait | `synchronized(this) { wait(); }` | Sleep without busy-polling |
+| Wake up on new request | `notifyAll()` in `addRequest()` | Wake elevator thread when request arrives |
+| `getCurrentFloor()` / `getDirection()` | `synchronized` method | Consistent reads for dispatcher scoring |
