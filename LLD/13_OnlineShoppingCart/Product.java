@@ -1,14 +1,8 @@
 package shop;
 
-import lombok.Getter;
-import lombok.Synchronized;
-
 public class Product {
-    @Getter
     private final String id;
-    @Getter
     private final String name;
-    @Getter
     private final double price;
     private int stock;
 
@@ -19,22 +13,11 @@ public class Product {
         this.stock = stock;
     }
 
-    @Synchronized
-    public int getStock() {
-        return stock;
-    }
+    public String getId()   { return id; }
+    public String getName() { return name; }
+    public double getPrice(){ return price; }
 
-    @Synchronized
-    public boolean decrementStock(int quantity) {
-        if (quantity <= stock) {
-            stock -= quantity;
-            return true;
-        }
-        return false;
-    }
-
-    @Synchronized
-    public void incrementStock(int quantity) {
-        stock += quantity;
-    }
+    public synchronized int getStock()                  { return stock; }
+    public synchronized boolean decrementStock(int qty) { if (qty <= stock) { stock -= qty; return true; } return false; }
+    public synchronized void incrementStock(int qty)    { stock += qty; }
 }

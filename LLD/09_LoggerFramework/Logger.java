@@ -1,6 +1,5 @@
 package logger;
 
-import lombok.Synchronized;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.BlockingQueue;
@@ -21,71 +20,41 @@ public class Logger {
         workerThread.start();
     }
 
-    @Synchronized
-    public static Logger getInstance() {
-        if (instance == null) {
-            instance = new Logger();
-        }
+    public static synchronized Logger getInstance() {
+        if (instance == null) instance = new Logger();
         return instance;
     }
 
-    @Synchronized
-    public void setThreshold(LogLevel level) {
-        this.thresholdLevel = level;
-    }
-
-    @Synchronized
-    public void addSink(LogSink sink) {
-        sinks.add(sink);
-    }
+    public synchronized void setThreshold(LogLevel level) { this.thresholdLevel = level; }
+    public synchronized void addSink(LogSink sink)        { sinks.add(sink); }
 
     public void log(LogLevel level, String message) {
-        if (level.ordinal() >= thresholdLevel.ordinal()) {
-            LogMessage logMessage = new LogMessage(level, message);
-            logQueue.offer(logMessage);
-        }
+        if (level.ordinal() >= thresholdLevel.ordinal()) logQueue.offer(new LogMessage(level, message));
     }
 
-    public void info(String message) {
-        log(LogLevel.INFO, message);
-    }
-
-    public void debug(String message) {
-        log(LogLevel.DEBUG, message);
-    }
-
-    public void error(String message) {
-        log(LogLevel.ERROR, message);
-    }
+    public void info(String message)  { log(LogLevel.INFO, message); }
+    public void debug(String message) { log(LogLevel.DEBUG, message); }
+    public void error(String message) { log(LogLevel.ERROR, message); }
 
     private void drainQueue() {
         try {
             while (running || !logQueue.isEmpty()) {
                 LogMessage msg = logQueue.poll();
-                if (msg != null) {
-                    dispatch(msg);
-                } else {
-                    Thread.sleep(50);
-                }
+                if (msg != null) dispatch(msg);
+                else Thread.sleep(50);
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
     }
 
-    @Synchronized
-    private void dispatch(LogMessage message) {
-        for (LogSink sink : sinks) {
-            sink.log(message);
-        }
+    private synchronized void dispatch(LogMessage message) {
+        for (LogSink sink : sinks) sink.log(message);
     }
 
     public void shutdown() {
         running = false;
-        try {
-            workerThread.join(2000);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
+        try { workerThread.join(2000); }
+        catch (InterruptedException e) { Thread.currentThread().interrupt(); }
     }
 }

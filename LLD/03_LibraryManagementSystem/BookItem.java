@@ -1,24 +1,11 @@
 package library;
 
-import lombok.Getter;
-import lombok.Setter;
-import lombok.Synchronized;
-
 public class BookItem {
-    public enum BookStatus {
-        AVAILABLE,
-        LOANED,
-        RESERVED,
-        LOST
-    }
+    public enum BookStatus { AVAILABLE, LOANED, RESERVED, LOST }
 
-    @Getter
     private final String barcode;
-    @Getter
     private final Book book;
     private BookStatus status;
-    @Getter
-    @Setter
     private String rackNumber;
 
     public BookItem(String barcode, Book book, String rackNumber) {
@@ -28,13 +15,11 @@ public class BookItem {
         this.rackNumber = rackNumber;
     }
 
-    @Synchronized
-    public BookStatus getStatus() {
-        return status;
-    }
+    public String getBarcode()    { return barcode; }
+    public Book getBook()         { return book; }
+    public String getRackNumber() { return rackNumber; }
+    public void setRackNumber(String rackNumber) { this.rackNumber = rackNumber; }
 
-    @Synchronized
-    public void setStatus(BookStatus status) {
-        this.status = status;
-    }
+    public synchronized BookStatus getStatus()            { return status; }
+    public synchronized void setStatus(BookStatus status) { this.status = status; }
 }

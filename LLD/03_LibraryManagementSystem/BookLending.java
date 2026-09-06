@@ -1,10 +1,7 @@
 package library;
 
-import lombok.Getter;
-import lombok.Synchronized;
 import java.time.LocalDateTime;
 
-@Getter
 public class BookLending {
     private final String barcode;
     private final String memberId;
@@ -20,8 +17,11 @@ public class BookLending {
         this.returnDate = null;
     }
 
-    @Synchronized
-    public void returnBook() {
-        this.returnDate = LocalDateTime.now();
-    }
+    public String getBarcode()             { return barcode; }
+    public String getMemberId()            { return memberId; }
+    public LocalDateTime getCreationDate() { return creationDate; }
+    public LocalDateTime getDueDate()      { return dueDate; }
+    public LocalDateTime getReturnDate()   { return returnDate; }
+
+    public synchronized void returnBook() { this.returnDate = LocalDateTime.now(); }
 }

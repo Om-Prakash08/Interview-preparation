@@ -1,20 +1,10 @@
 package library;
 
-import lombok.Getter;
-import lombok.Synchronized;
-
 public abstract class Account {
-    public enum AccountStatus {
-        ACTIVE,
-        CLOSED,
-        BLACKLISTED
-    }
+    public enum AccountStatus { ACTIVE, CLOSED, BLACKLISTED }
 
-    @Getter
     private final String id;
-    @Getter
     private final String password;
-    @Getter
     private final String name;
     private AccountStatus status;
 
@@ -25,15 +15,12 @@ public abstract class Account {
         this.status = AccountStatus.ACTIVE;
     }
 
-    @Synchronized
-    public AccountStatus getStatus() {
-        return status;
-    }
+    public String getId()       { return id; }
+    public String getPassword() { return password; }
+    public String getName()     { return name; }
 
-    @Synchronized
-    public void setStatus(AccountStatus status) {
-        this.status = status;
-    }
+    public synchronized AccountStatus getStatus()              { return status; }
+    public synchronized void setStatus(AccountStatus status)   { this.status = status; }
 }
 
 class Member extends Account {
@@ -44,21 +31,10 @@ class Member extends Account {
         this.borrowedBooksCount = 0;
     }
 
-    @Synchronized
-    public int getBorrowedBooksCount() {
-        return borrowedBooksCount;
-    }
-
-    @Synchronized
-    public void incrementBorrowedBooksCount() {
-        this.borrowedBooksCount++;
-    }
-
-    @Synchronized
-    public void decrementBorrowedBooksCount() {
-        if (borrowedBooksCount > 0) {
-            this.borrowedBooksCount--;
-        }
+    public synchronized int getBorrowedBooksCount()      { return borrowedBooksCount; }
+    public synchronized void incrementBorrowedBooksCount() { this.borrowedBooksCount++; }
+    public synchronized void decrementBorrowedBooksCount() {
+        if (borrowedBooksCount > 0) this.borrowedBooksCount--;
     }
 }
 

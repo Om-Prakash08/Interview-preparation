@@ -1,18 +1,10 @@
 package vending;
 
-import lombok.Getter;
-import lombok.Synchronized;
-
 public class VendingMachine {
-    @Getter
     private final Inventory inventory;
-    @Getter
     private final State idleState;
-    @Getter
     private final State hasMoneyState;
-    @Getter
     private final State dispenseState;
-
     private State currentState;
     private double deposit = 0.0;
     private String selectedProductCode = null;
@@ -25,58 +17,21 @@ public class VendingMachine {
         this.currentState = idleState;
     }
 
-    @Synchronized
-    public void setState(State state) {
-        this.currentState = state;
-    }
+    public Inventory getInventory()      { return inventory; }
+    public State getIdleState()          { return idleState; }
+    public State getHasMoneyState()      { return hasMoneyState; }
+    public State getDispenseState()      { return dispenseState; }
 
-    @Synchronized
-    public State getCurrentState() {
-        return currentState;
-    }
+    public synchronized void setState(State state)           { this.currentState = state; }
+    public synchronized State getCurrentState()              { return currentState; }
+    public synchronized double getDeposit()                  { return deposit; }
+    public synchronized void addDeposit(double amount)       { this.deposit += amount; }
+    public synchronized void clearDeposit()                  { this.deposit = 0.0; }
+    public synchronized String getSelectedProductCode()      { return selectedProductCode; }
+    public synchronized void setSelectedProductCode(String c){ this.selectedProductCode = c; }
 
-    @Synchronized
-    public double getDeposit() {
-        return deposit;
-    }
-
-    @Synchronized
-    public void addDeposit(double amount) {
-        this.deposit += amount;
-    }
-
-    @Synchronized
-    public void clearDeposit() {
-        this.deposit = 0.0;
-    }
-
-    @Synchronized
-    public String getSelectedProductCode() {
-        return selectedProductCode;
-    }
-
-    @Synchronized
-    public void setSelectedProductCode(String code) {
-        this.selectedProductCode = code;
-    }
-
-    @Synchronized
-    public void insertCoin(Coin coin) {
-        currentState.insertCoin(coin);
-    }
-
-    @Synchronized
-    public void selectProduct(String code) {
-        currentState.selectProduct(code);
-    }
-
-    @Synchronized
-    public void dispense() {
-        currentState.dispenseProduct();
-    }
-
-    @Synchronized
-    public void cancelTransaction() {
-        currentState.refund();
-    }
+    public synchronized void insertCoin(Coin coin)           { currentState.insertCoin(coin); }
+    public synchronized void selectProduct(String code)      { currentState.selectProduct(code); }
+    public synchronized void dispense()                      { currentState.dispenseProduct(); }
+    public synchronized void cancelTransaction()             { currentState.refund(); }
 }

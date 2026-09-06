@@ -1,6 +1,5 @@
 package fs;
 
-import lombok.Synchronized;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -12,35 +11,24 @@ public class Directory extends Entry {
         this.children = new ArrayList<>();
     }
 
-    @Override
-    public boolean isDirectory() {
-        return true;
-    }
+    @Override public boolean isDirectory() { return true; }
 
     @Override
-    @Synchronized
-    public int getSize() {
+    public synchronized int getSize() {
         int total = 0;
-        for (Entry e : children) {
-            total += e.getSize();
-        }
+        for (Entry e : children) total += e.getSize();
         return total;
     }
 
-    @Synchronized
-    public List<Entry> getChildren() {
-        return new ArrayList<>(children);
-    }
+    public synchronized List<Entry> getChildren()    { return new ArrayList<>(children); }
 
-    @Synchronized
-    public void addEntry(Entry entry) {
+    public synchronized void addEntry(Entry entry) {
         children.add(entry);
         entry.setParent(this);
         this.lastUpdated = System.currentTimeMillis();
     }
 
-    @Synchronized
-    public void removeEntry(Entry entry) {
+    public synchronized void removeEntry(Entry entry) {
         children.remove(entry);
         this.lastUpdated = System.currentTimeMillis();
     }

@@ -1,10 +1,8 @@
 package hotel;
 
-import lombok.Getter;
 import java.util.ArrayList;
 import java.util.List;
 
-@Getter
 public class Hotel {
     private final String name;
     private final String location;
@@ -16,7 +14,9 @@ public class Hotel {
         this.rooms = new ArrayList<>();
     }
 
-    public void addRoom(Room room) {
-        rooms.add(room);
-    }
+    public String getName()     { return name; }
+    public String getLocation() { return location; }
+    public List<Room> getRooms(){ return rooms; }
+
+    public void addRoom(Room room) { rooms.add(room); }
 }

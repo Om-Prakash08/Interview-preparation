@@ -1,10 +1,8 @@
 package shop;
 
-import lombok.Getter;
 import java.util.List;
 import java.util.UUID;
 
-@Getter
 public class Order {
     private final String orderId;
     private final List<CartItem> items;
@@ -17,4 +15,9 @@ public class Order {
         this.finalAmount = finalAmount;
         this.status = "PLACED";
     }
+
+    public String getOrderId()        { return orderId; }
+    public List<CartItem> getItems()  { return items; }
+    public double getFinalAmount()    { return finalAmount; }
+    public String getStatus()         { return status; }
 }

@@ -1,11 +1,8 @@
 package library;
 
-import lombok.Getter;
-import lombok.Synchronized;
 import java.time.Duration;
 import java.time.LocalDateTime;
 
-@Getter
 public class Fine {
     private final String memberId;
     private final String barcode;
@@ -19,16 +16,16 @@ public class Fine {
         this.isPaid = false;
     }
 
+    public String getMemberId() { return memberId; }
+    public String getBarcode()  { return barcode; }
+    public double getAmount()   { return amount; }
+    public boolean isPaid()     { return isPaid; }
+
     public static double calculateFine(LocalDateTime dueDate, LocalDateTime returnDate) {
-        if (returnDate.isBefore(dueDate)) {
-            return 0.0;
-        }
+        if (returnDate.isBefore(dueDate)) return 0.0;
         long daysLate = Duration.between(dueDate, returnDate).toDays();
         return daysLate * 1.50;
     }
 
-    @Synchronized
-    public void payFine() {
-        this.isPaid = true;
-    }
+    public synchronized void payFine() { this.isPaid = true; }
 }

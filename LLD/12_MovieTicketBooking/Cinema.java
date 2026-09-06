@@ -1,10 +1,8 @@
 package booking;
 
-import lombok.Getter;
 import java.util.ArrayList;
 import java.util.List;
 
-@Getter
 public class Cinema {
     private final String name;
     private final String city;
@@ -16,7 +14,9 @@ public class Cinema {
         this.shows = new ArrayList<>();
     }
 
-    public void addShow(Show show) {
-        shows.add(show);
-    }
+    public String getName()     { return name; }
+    public String getCity()     { return city; }
+    public List<Show> getShows(){ return shows; }
+
+    public void addShow(Show show) { shows.add(show); }
 }

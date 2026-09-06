@@ -1,12 +1,7 @@
 package fs;
 
-import lombok.Getter;
-import lombok.Setter;
-
-@Getter
 public abstract class Entry {
     protected final String name;
-    @Setter
     protected Directory parent;
     protected final long created;
     protected long lastUpdated;
@@ -18,16 +13,18 @@ public abstract class Entry {
         this.lastUpdated = created;
     }
 
+    public String getName()      { return name; }
+    public Directory getParent() { return parent; }
+    public long getCreated()     { return created; }
+    public long getLastUpdated() { return lastUpdated; }
+    public void setParent(Directory parent) { this.parent = parent; }
+
     public abstract boolean isDirectory();
     public abstract int getSize();
 
     public String getFullPath() {
-        if (parent == null) {
-            return "/";
-        }
-        if (parent.parent == null) {
-            return "/" + name;
-        }
+        if (parent == null) return "/";
+        if (parent.parent == null) return "/" + name;
         return parent.getFullPath() + "/" + name;
     }
 }

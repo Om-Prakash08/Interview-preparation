@@ -1,16 +1,15 @@
 package game;
 
-import lombok.Getter;
-import lombok.Synchronized;
 import java.util.*;
 
 public class Game {
     private final Board board;
     private final Dice dice;
     private final Queue<Player> players;
-    @Getter
     private final List<Player> leaderboard;
     private boolean isGameOver;
+
+    public List<Player> getLeaderboard() { return leaderboard; }
 
     public Game(Board board, Dice dice, List<Player> playerList) {
         this.board = board;
@@ -20,41 +19,33 @@ public class Game {
         this.isGameOver = false;
     }
 
-    @Synchronized
-    public void playTurn() {
-        if (isGameOver) {
-            return;
-        }
+    public synchronized void playTurn() {
+        if (isGameOver) return;
 
         Player currentPlayer = players.poll();
         int diceValue = dice.roll();
         int currentPos = currentPlayer.getPosition();
         int finalPos = currentPos + diceValue;
 
-        System.out.printf("[Roll] %s rolled a %d (Position: %d -> %d)%n", 
+        System.out.printf("[Roll] %s rolled a %d (Position: %d -> %d)%n",
                 currentPlayer.getName(), diceValue, currentPos, finalPos);
 
         if (finalPos > board.getSize()) {
-            System.out.printf("  [Out of bounds] Move exceeds cell %d. %s stays at %d.%n", 
+            System.out.printf("  [Out of bounds] Move exceeds cell %d. %s stays at %d.%n",
                     board.getSize(), currentPlayer.getName(), currentPos);
-            players.offer(currentPlayer); 
+            players.offer(currentPlayer);
         } else {
             int actualPos = board.getNextPosition(finalPos);
             currentPlayer.setPosition(actualPos);
-
             if (actualPos == board.getSize()) {
-                System.out.printf("[Game Over] %s reached cell %d and WON the game!%n", 
-                        currentPlayer.getName(), board.getSize());
+                System.out.printf("[Game Over] %s reached cell %d and WON!%n", currentPlayer.getName(), board.getSize());
                 leaderboard.add(currentPlayer);
-                isGameOver = true; 
+                isGameOver = true;
             } else {
                 players.offer(currentPlayer);
             }
         }
     }
 
-    @Synchronized
-    public boolean isGameOver() {
-        return isGameOver;
-    }
+    public synchronized boolean isGameOver() { return isGameOver; }
 }

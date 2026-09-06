@@ -1,10 +1,6 @@
 package shop;
 
-import lombok.Getter;
-import lombok.Synchronized;
-
 public class CartItem {
-    @Getter
     private final Product product;
     private int quantity;
 
@@ -13,17 +9,9 @@ public class CartItem {
         this.quantity = quantity;
     }
 
-    @Synchronized
-    public int getQuantity() {
-        return quantity;
-    }
+    public Product getProduct()           { return product; }
+    public synchronized int getQuantity() { return quantity; }
+    public synchronized void setQuantity(int quantity) { this.quantity = quantity; }
 
-    @Synchronized
-    public void setQuantity(int quantity) {
-        this.quantity = quantity;
-    }
-
-    public double getSubTotal() {
-        return product.getPrice() * quantity;
-    }
+    public double getSubTotal() { return product.getPrice() * quantity; }
 }

@@ -1,9 +1,5 @@
 package uber;
 
-import lombok.Getter;
-import lombok.Synchronized;
-
-@Getter
 public class Ride {
     private final String rideId;
     private final Rider rider;
@@ -23,13 +19,13 @@ public class Ride {
         this.status = RideStatus.REQUESTED;
     }
 
-    @Synchronized
-    public RideStatus getStatus() {
-        return status;
-    }
+    public String getRideId()         { return rideId; }
+    public Rider getRider()           { return rider; }
+    public Driver getDriver()         { return driver; }
+    public Location getPickup()       { return pickup; }
+    public Location getDestination()  { return destination; }
+    public double getFare()           { return fare; }
 
-    @Synchronized
-    public void setStatus(RideStatus status) {
-        this.status = status;
-    }
+    public synchronized RideStatus getStatus()              { return status; }
+    public synchronized void setStatus(RideStatus status)   { this.status = status; }
 }

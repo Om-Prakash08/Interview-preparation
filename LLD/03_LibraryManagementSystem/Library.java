@@ -1,14 +1,11 @@
 package library;
 
-import lombok.Getter;
-import lombok.Synchronized;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class Library {
     private static Library instance;
     private final String name;
-    @Getter
     private final Catalog catalog;
     private final Map<String, BookItem> bookItems;
     private final Map<String, Account> accounts;
@@ -29,13 +26,14 @@ public class Library {
         this.fines = Collections.synchronizedList(new ArrayList<>());
     }
 
-    @Synchronized
-    public static Library getInstance() {
+    public static synchronized Library getInstance() {
         if (instance == null) {
             instance = new Library("FAANG Central Library");
         }
         return instance;
     }
+
+    public Catalog getCatalog() { return catalog; }
 
     public void registerAccount(Account account) {
         accounts.put(account.getId(), account);
@@ -53,8 +51,7 @@ public class Library {
                 bookItem.getBook().getTitle(), bookItem.getBook().getIsbn(), bookItem.getBarcode());
     }
 
-    @Synchronized
-    public boolean borrowBookItem(String memberId, String barcode) {
+    public synchronized boolean borrowBookItem(String memberId, String barcode) {
         Account account = accounts.get(memberId);
         if (!(account instanceof Member)) {
             System.out.println("Only members can borrow books.");
@@ -103,8 +100,7 @@ public class Library {
         return true;
     }
 
-    @Synchronized
-    public void reserveBookItem(String memberId, String barcode) {
+    public synchronized void reserveBookItem(String memberId, String barcode) {
         Account account = accounts.get(memberId);
         if (!(account instanceof Member)) return;
         Member member = (Member) account;
@@ -124,8 +120,7 @@ public class Library {
         System.out.printf("[Reserve] Member %s reserved '%s'%n", member.getName(), bookItem.getBook().getTitle());
     }
 
-    @Synchronized
-    public void returnBookItem(String memberId, String barcode) {
+    public synchronized void returnBookItem(String memberId, String barcode) {
         Account account = accounts.get(memberId);
         if (!(account instanceof Member)) return;
         Member member = (Member) account;

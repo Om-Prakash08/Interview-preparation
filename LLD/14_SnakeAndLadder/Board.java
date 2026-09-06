@@ -1,11 +1,9 @@
 package game;
 
-import lombok.Getter;
 import java.util.HashMap;
 import java.util.Map;
 
 public class Board {
-    @Getter
     private final int size;
     private final Map<Integer, Snake> snakes;
     private final Map<Integer, Ladder> ladders;
@@ -16,13 +14,10 @@ public class Board {
         this.ladders = new HashMap<>();
     }
 
-    public void addSnake(Snake snake) {
-        snakes.put(snake.getHead(), snake);
-    }
+    public int getSize() { return size; }
 
-    public void addLadder(Ladder ladder) {
-        ladders.put(ladder.getStart(), ladder);
-    }
+    public void addSnake(Snake snake)   { snakes.put(snake.getHead(), snake); }
+    public void addLadder(Ladder ladder){ ladders.put(ladder.getStart(), ladder); }
 
     public int getNextPosition(int currentPos) {
         int nextPos = currentPos;
@@ -35,9 +30,7 @@ public class Board {
                 Ladder ladder = ladders.get(nextPos);
                 System.out.printf("  [Ladder Climbed] Ascended from %d up to %d!%n", nextPos, ladder.getEnd());
                 nextPos = ladder.getEnd();
-            } else {
-                break;
-            }
+            } else break;
         }
         return nextPos;
     }

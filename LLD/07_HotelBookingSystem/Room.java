@@ -1,17 +1,12 @@
 package hotel;
 
-import lombok.Getter;
-import lombok.Synchronized;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 
 public class Room {
-    @Getter
     private final String roomNumber;
-    @Getter
     private final RoomStyle style;
-    @Getter
     private final double pricePerNight;
     private RoomStatus status;
     private final List<RoomBooking> bookings;
@@ -24,38 +19,22 @@ public class Room {
         this.bookings = new ArrayList<>();
     }
 
-    @Synchronized
-    public RoomStatus getStatus() {
-        return status;
-    }
+    public String getRoomNumber()    { return roomNumber; }
+    public RoomStyle getStyle()      { return style; }
+    public double getPricePerNight() { return pricePerNight; }
 
-    @Synchronized
-    public void setStatus(RoomStatus status) {
-        this.status = status;
-    }
+    public synchronized RoomStatus getStatus()            { return status; }
+    public synchronized void setStatus(RoomStatus status) { this.status = status; }
+    public synchronized List<RoomBooking> getBookings()   { return new ArrayList<>(bookings); }
+    public synchronized void addBooking(RoomBooking b)    { bookings.add(b); }
 
-    @Synchronized
-    public List<RoomBooking> getBookings() {
-        return new ArrayList<>(bookings);
-    }
-
-    @Synchronized
-    public boolean isAvailable(LocalDate start, LocalDate end) {
-        if (status == RoomStatus.BEING_SERVICED) {
-            return false;
-        }
+    public synchronized boolean isAvailable(LocalDate start, LocalDate end) {
+        if (status == RoomStatus.BEING_SERVICED) return false;
         for (RoomBooking booking : bookings) {
             if (booking.getStatus() == BookingStatus.ACTIVE || booking.getStatus() == BookingStatus.CHECKED_IN) {
-                if (booking.overlaps(start, end)) {
-                    return false;
-                }
+                if (booking.overlaps(start, end)) return false;
             }
         }
         return true;
-    }
-
-    @Synchronized
-    public void addBooking(RoomBooking booking) {
-        bookings.add(booking);
     }
 }

@@ -1,9 +1,7 @@
 package booking;
 
-import lombok.Getter;
 import java.util.List;
 
-@Getter
 public class Booking {
     private final String bookingId;
     private final Show show;
@@ -19,11 +17,15 @@ public class Booking {
         this.amountPaid = calculateTotal();
     }
 
+    public String getBookingId()          { return bookingId; }
+    public Show getShow()                 { return show; }
+    public List<ShowSeat> getSeatsBooked(){ return seatsBooked; }
+    public double getAmountPaid()         { return amountPaid; }
+    public String getUserName()           { return userName; }
+
     private double calculateTotal() {
         double sum = 0.0;
-        for (ShowSeat s : seatsBooked) {
-            sum += s.getPrice();
-        }
+        for (ShowSeat s : seatsBooked) sum += s.getPrice();
         return sum;
     }
 }

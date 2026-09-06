@@ -1,16 +1,9 @@
 package library;
 
-import lombok.Getter;
-import lombok.Synchronized;
 import java.time.LocalDateTime;
 
-@Getter
 public class BookReservation {
-    public enum ReservationStatus {
-        WAITING,
-        COMPLETED,
-        CANCELLED
-    }
+    public enum ReservationStatus { WAITING, COMPLETED, CANCELLED }
 
     private final String barcode;
     private final String memberId;
@@ -24,13 +17,10 @@ public class BookReservation {
         this.status = ReservationStatus.WAITING;
     }
 
-    @Synchronized
-    public ReservationStatus getStatus() {
-        return status;
-    }
+    public String getBarcode()             { return barcode; }
+    public String getMemberId()            { return memberId; }
+    public LocalDateTime getCreationDate() { return creationDate; }
 
-    @Synchronized
-    public void setStatus(ReservationStatus status) {
-        this.status = status;
-    }
+    public synchronized ReservationStatus getStatus()               { return status; }
+    public synchronized void setStatus(ReservationStatus status)    { this.status = status; }
 }

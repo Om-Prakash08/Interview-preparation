@@ -1,7 +1,5 @@
 package fs;
 
-import lombok.Synchronized;
-
 public class File extends Entry {
     private String content;
 
@@ -10,31 +8,12 @@ public class File extends Entry {
         this.content = "";
     }
 
-    @Override
-    public boolean isDirectory() {
-        return false;
-    }
+    @Override public boolean isDirectory() { return false; }
 
     @Override
-    @Synchronized
-    public int getSize() {
-        return content.length();
-    }
+    public synchronized int getSize() { return content.length(); }
 
-    @Synchronized
-    public String getContent() {
-        return content;
-    }
-
-    @Synchronized
-    public void appendContent(String content) {
-        this.content += content;
-        this.lastUpdated = System.currentTimeMillis();
-    }
-
-    @Synchronized
-    public void setContent(String content) {
-        this.content = content;
-        this.lastUpdated = System.currentTimeMillis();
-    }
+    public synchronized String getContent()            { return content; }
+    public synchronized void appendContent(String c)   { this.content += c; this.lastUpdated = System.currentTimeMillis(); }
+    public synchronized void setContent(String c)      { this.content = c;  this.lastUpdated = System.currentTimeMillis(); }
 }

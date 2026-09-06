@@ -1,11 +1,9 @@
 package booking;
 
-import lombok.Getter;
 import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.Map;
 
-@Getter
 public class Show {
     private final String showId;
     private final Movie movie;
@@ -22,21 +20,19 @@ public class Show {
         initializeSeats(numSeats);
     }
 
+    public String getShowId()          { return showId; }
+    public Movie getMovie()            { return movie; }
+    public String getScreenName()      { return screenName; }
+    public LocalDateTime getStartTime(){ return startTime; }
+    public Map<String, ShowSeat> getSeats() { return seats; }
+
     private void initializeSeats(int numSeats) {
         for (int i = 1; i <= numSeats; i++) {
             String seatId = "Seat-" + i;
-            SeatType type;
-            double price;
-            if (i <= numSeats / 5) {
-                type = SeatType.PLATINUM;
-                price = 300.0;
-            } else if (i <= (numSeats * 3) / 5) {
-                type = SeatType.GOLD;
-                price = 200.0;
-            } else {
-                type = SeatType.SILVER;
-                price = 150.0;
-            }
+            SeatType type; double price;
+            if (i <= numSeats / 5)          { type = SeatType.PLATINUM; price = 300.0; }
+            else if (i <= (numSeats * 3)/5) { type = SeatType.GOLD;     price = 200.0; }
+            else                            { type = SeatType.SILVER;   price = 150.0; }
             seats.put(seatId, new ShowSeat(seatId, type, price));
         }
     }

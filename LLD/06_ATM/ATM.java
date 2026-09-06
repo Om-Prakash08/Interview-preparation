@@ -1,20 +1,11 @@
 package atm;
 
-import lombok.Getter;
-import lombok.Synchronized;
-
 public class ATM {
-    @Getter
     private final BankService bankService;
-    @Getter
     private final CashDispenser cashDispenser;
-    @Getter
     private final ATMState idleState;
-    @Getter
     private final ATMState pinState;
-    @Getter
     private final ATMState transactionState;
-
     private ATMState currentState;
     private Card currentCard;
 
@@ -27,48 +18,20 @@ public class ATM {
         this.currentState = idleState;
     }
 
-    @Synchronized
-    public void setState(ATMState state) {
-        this.currentState = state;
-    }
+    public BankService getBankService()       { return bankService; }
+    public CashDispenser getCashDispenser()   { return cashDispenser; }
+    public ATMState getIdleState()            { return idleState; }
+    public ATMState getPinState()             { return pinState; }
+    public ATMState getTransactionState()     { return transactionState; }
 
-    @Synchronized
-    public ATMState getCurrentState() {
-        return currentState;
-    }
+    public synchronized void setState(ATMState state)    { this.currentState = state; }
+    public synchronized ATMState getCurrentState()       { return currentState; }
+    public synchronized Card getCurrentCard()            { return currentCard; }
+    public synchronized void setCurrentCard(Card card)   { this.currentCard = card; }
 
-    @Synchronized
-    public Card getCurrentCard() {
-        return currentCard;
-    }
-
-    @Synchronized
-    public void setCurrentCard(Card card) {
-        this.currentCard = card;
-    }
-
-    @Synchronized
-    public void insertCard(Card card) {
-        currentState.insertCard(card);
-    }
-
-    @Synchronized
-    public void enterPin(int pin) {
-        currentState.enterPin(pin);
-    }
-
-    @Synchronized
-    public void checkBalance() {
-        currentState.checkBalance();
-    }
-
-    @Synchronized
-    public void withdraw(int amount) {
-        currentState.withdraw(amount);
-    }
-
-    @Synchronized
-    public void ejectCard() {
-        currentState.ejectCard();
-    }
+    public synchronized void insertCard(Card card) { currentState.insertCard(card); }
+    public synchronized void enterPin(int pin)     { currentState.enterPin(pin); }
+    public synchronized void checkBalance()        { currentState.checkBalance(); }
+    public synchronized void withdraw(int amount)  { currentState.withdraw(amount); }
+    public synchronized void ejectCard()           { currentState.ejectCard(); }
 }

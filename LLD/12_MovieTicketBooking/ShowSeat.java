@@ -1,14 +1,8 @@
 package booking;
 
-import lombok.Getter;
-import lombok.Synchronized;
-
 public class ShowSeat {
-    @Getter
     private final String seatId;
-    @Getter
     private final SeatType type;
-    @Getter
     private final double price;
     private boolean isBooked;
 
@@ -19,22 +13,11 @@ public class ShowSeat {
         this.isBooked = false;
     }
 
-    @Synchronized
-    public boolean isBooked() {
-        return isBooked;
-    }
+    public String getSeatId()  { return seatId; }
+    public SeatType getType()  { return type; }
+    public double getPrice()   { return price; }
 
-    @Synchronized
-    public boolean reserve() {
-        if (isBooked) {
-            return false;
-        }
-        isBooked = true;
-        return true;
-    }
-
-    @Synchronized
-    public void cancel() {
-        isBooked = false;
-    }
+    public synchronized boolean isBooked()  { return isBooked; }
+    public synchronized boolean reserve()   { if (isBooked) return false; isBooked = true; return true; }
+    public synchronized void cancel()       { isBooked = false; }
 }

@@ -1,13 +1,8 @@
 package chess;
 
-import lombok.Getter;
-import lombok.Setter;
-
-@Getter
 public class Box {
     private final int x;
     private final int y;
-    @Setter
     private Piece piece;
 
     public Box(int x, int y) {
@@ -15,4 +10,9 @@ public class Box {
         this.y = y;
         this.piece = null;
     }
+
+    public int getX()       { return x; }
+    public int getY()       { return y; }
+    public Piece getPiece() { return piece; }
+    public void setPiece(Piece piece) { this.piece = piece; }
 }

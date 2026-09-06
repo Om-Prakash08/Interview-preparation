@@ -1,8 +1,5 @@
 package chess;
 
-import lombok.Getter;
-
-@Getter
 public class Move {
     private final Player player;
     private final Box start;
@@ -17,4 +14,10 @@ public class Move {
         this.pieceMoved = start.getPiece();
         this.pieceKilled = end.getPiece();
     }
+
+    public Player getPlayer()      { return player; }
+    public Box getStart()          { return start; }
+    public Box getEnd()            { return end; }
+    public Piece getPieceMoved()   { return pieceMoved; }
+    public Piece getPieceKilled()  { return pieceKilled; }
 }

@@ -1,13 +1,8 @@
 package atm;
 
-import lombok.Getter;
-import lombok.Synchronized;
-
 public class Account {
-    @Getter
     private final String accountNumber;
     private double balance;
-    @Getter
     private final String ownerName;
 
     public Account(String accountNumber, String ownerName, double initialBalance) {
@@ -16,20 +11,10 @@ public class Account {
         this.balance = initialBalance;
     }
 
-    @Synchronized
-    public double getBalance() {
-        return balance;
-    }
+    public String getAccountNumber() { return accountNumber; }
+    public String getOwnerName()     { return ownerName; }
 
-    @Synchronized
-    public void debit(double amount) {
-        if (amount <= balance) {
-            balance -= amount;
-        }
-    }
-
-    @Synchronized
-    public void credit(double amount) {
-        balance += amount;
-    }
+    public synchronized double getBalance()          { return balance; }
+    public synchronized void debit(double amount)    { if (amount <= balance) balance -= amount; }
+    public synchronized void credit(double amount)   { balance += amount; }
 }

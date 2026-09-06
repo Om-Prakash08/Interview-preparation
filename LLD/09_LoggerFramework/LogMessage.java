@@ -1,9 +1,7 @@
 package logger;
 
-import lombok.Getter;
 import java.time.LocalDateTime;
 
-@Getter
 public class LogMessage {
     private final LocalDateTime timestamp;
     private final LogLevel level;
@@ -17,9 +15,13 @@ public class LogMessage {
         this.threadName = Thread.currentThread().getName();
     }
 
+    public LocalDateTime getTimestamp() { return timestamp; }
+    public LogLevel getLevel()          { return level; }
+    public String getMessage()          { return message; }
+    public String getThreadName()       { return threadName; }
+
     @Override
     public String toString() {
-        return String.format("[%s] [%s] [%s] - %s", 
-                timestamp, level, threadName, message);
+        return String.format("[%s] [%s] [%s] - %s", timestamp, level, threadName, message);
     }
 }

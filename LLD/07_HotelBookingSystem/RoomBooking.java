@@ -1,11 +1,8 @@
 package hotel;
 
-import lombok.Getter;
-import lombok.Synchronized;
 import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
 
-@Getter
 public class RoomBooking {
     private final String bookingId;
     private final String roomNumber;
@@ -26,15 +23,15 @@ public class RoomBooking {
         this.totalAmount = (days <= 0 ? 1 : days) * ratePerNight;
     }
 
-    @Synchronized
-    public BookingStatus getStatus() {
-        return status;
-    }
+    public String getBookingId()    { return bookingId; }
+    public String getRoomNumber()   { return roomNumber; }
+    public Guest getGuest()         { return guest; }
+    public LocalDate getStartDate() { return startDate; }
+    public LocalDate getEndDate()   { return endDate; }
+    public double getTotalAmount()  { return totalAmount; }
 
-    @Synchronized
-    public void setStatus(BookingStatus status) {
-        this.status = status;
-    }
+    public synchronized BookingStatus getStatus()               { return status; }
+    public synchronized void setStatus(BookingStatus status)    { this.status = status; }
 
     public boolean overlaps(LocalDate start, LocalDate end) {
         return this.startDate.isBefore(end) && start.isBefore(this.endDate);
