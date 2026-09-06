@@ -20,19 +20,19 @@ public class Demo {
         // Simulate external hall calls
         System.out.println("\n--- Simulating External Hall Calls ---");
         // Passenger on Floor 3 wants to go UP
-        controller.dispatch(new Request(3, Direction.UP));
+        controller.requestElevator(new HallRequest(3, Direction.UP));
         // Passenger on Floor 7 wants to go DOWN
-        controller.dispatch(new Request(7, Direction.DOWN));
+        controller.requestElevator(new HallRequest(7, Direction.DOWN));
 
         // Simulate internal destination selections inside the elevator cabin
         System.out.println("\n--- Simulating Passengers Inside Cabins Selection ---");
         // Passenger in Elevator 1 requests floor 8
         System.out.println("[Cab 1] Passenger selects Floor 8");
-        e1.addRequest(8, Direction.IDLE);
+        e1.addCabinRequest(new CabinRequest(8));
 
         // Passenger in Elevator 2 requests floor 2
         System.out.println("[Cab 2] Passenger selects Floor 2");
-        e2.addRequest(2, Direction.IDLE);
+        e2.addCabinRequest(new CabinRequest(2));
 
         System.out.println("\n--- Starting Simulation Loop ---");
         boolean systemHasRequests = true;

@@ -9,57 +9,91 @@ public class ElevatorController {
         this.elevators = elevators;
     }
 
-    public void dispatch(Request request) {
-        Elevator bestElevator = null;
-        int minCost = Integer.MAX_VALUE;
-
-        for (Elevator elevator : elevators) {
-            int cost = calculateCost(elevator, request);
-            if (cost < minCost) {
-                minCost = cost;
-                bestElevator = elevator;
-            }
-        }
+    public void requestElevator(HallRequest request) {
+        Elevator bestElevator = selectBestElevator(request);
 
         if (bestElevator != null) {
             System.out.printf("[ElevatorController] Routing call from Floor %d (%s) to Elevator %d%n",
-                    request.getFloor(), request.getDirection(), bestElevator.getId());
-            bestElevator.addRequest(request.getFloor(), request.getDirection());
+                    request.getPickupFloor(), request.getDirection(), bestElevator.getId());
+            bestElevator.addHallRequest(request);
         }
     }
 
-    private int calculateCost(Elevator elevator, Request request) {
-        int elevatorFloor = elevator.getCurrentFloor();
-        Direction elevatorDir = elevator.getDirection();
-        int requestFloor = request.getFloor();
-        Direction requestDir = request.getDirection();
-
-        int distance = Math.abs(elevatorFloor - requestFloor);
-
-        if (elevatorDir == Direction.IDLE) {
-            return distance; // IDLE elevator gets direct distance score
+    private Elevator selectBestElevator(HallRequest request) {
+        // Priority 1: Elevators moving toward the floor in the right direction
+        Elevator bestElevator = findMovingToward(request);
+        if (bestElevator != null) {
+            return bestElevator;
         }
 
-        if (elevatorDir == Direction.UP) {
-            if (requestFloor >= elevatorFloor) {
-                if (requestDir == Direction.UP) {
-                    return distance; // Best matching case
-                } else {
-                    return distance + 5; // Moving towards request but in opposite target direction
-                }
-            } else {
-                return distance + 20; // Passed the floor, high penalty
+        bestElevator = findNearestIdle(request.getPickupFloor());
+        if (bestElevator != null) {
+            return bestElevator;
+        }
+
+        return findNearest(request.getPickupFloor());
+    }
+
+    private Elevator findMovingToward(HallRequest request) {
+        Elevator nearest = null;
+        int minDistance = Integer.MAX_VALUE;
+
+        for (Elevator elevator : elevators) {
+            if (elevator.getDirection() != request.getDirection()) {
+                continue;
             }
-        } else { // Direction.DOWN
-            if (requestFloor <= elevatorFloor) {
-                if (requestDir == Direction.DOWN) {
-                    return distance; // Best matching case
-                } else {
-                    return distance + 5;
-                }
-            } else {
-                return distance + 20; // Passed the floor, high penalty
+
+            int elevatorFloor = elevator.getCurrentFloor();
+            int pickupFloor = request.getPickupFloor();
+            boolean hasPassedPickup =
+                    (request.getDirection() == Direction.UP && elevatorFloor > pickupFloor)
+                    || (request.getDirection() == Direction.DOWN && elevatorFloor < pickupFloor);
+
+            if (hasPassedPickup) {
+                continue;
+            }
+
+            int distance = Math.abs(elevatorFloor - pickupFloor);
+            if (distance < minDistance) {
+                minDistance = distance;
+                nearest = elevator;
             }
         }
+
+        return nearest;
+    }
+
+    private Elevator findNearestIdle(int pickupFloor) {
+        Elevator nearest = null;
+        int minDistance = Integer.MAX_VALUE;
+
+        for (Elevator elevator : elevators) {
+            if (elevator.getDirection() != Direction.IDLE) {
+                continue;
+            }
+
+            int distance = Math.abs(elevator.getCurrentFloor() - pickupFloor);
+            if (distance < minDistance) {
+                minDistance = distance;
+                nearest = elevator;
+            }
+        }
+
+        return nearest;
+    }
+
+    private Elevator findNearest(int pickupFloor) {
+        Elevator nearest = null;
+        int minDistance = Integer.MAX_VALUE;
+
+        for (Elevator elevator : elevators) {
+            int distance = Math.abs(elevator.getCurrentFloor() - pickupFloor);
+            if (distance < minDistance) {
+                minDistance = distance;
+                nearest = elevator;
+            }
+        }
+
+        return nearest;
     }
 }

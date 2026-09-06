@@ -33,9 +33,10 @@
 | Entity | Type | Responsibility |
 |---|---|---|
 | `Direction` | Enum | `UP, DOWN, IDLE` |
-| `Request` | Class | Holds `floor` + `Direction` (hall call or cabin call) |
+| `HallRequest` | Class | Holds pickup floor + required travel direction |
+| `CabinRequest` | Class | Holds a destination selected inside one elevator |
 | `Elevator` | Class | Manages current state (`floor`, `direction`) and request queues (`upQueue`, `downQueue`) |
-| `ElevatorController` | Class | Routes incoming requests to the best elevator by cost score |
+| `ElevatorController` | Class | Routes hall calls using direction, idle-state, and distance priorities |
 
 ---
 
@@ -57,13 +58,13 @@ Elevator
 ```java
 public enum Direction { UP, DOWN, IDLE }
 
-public class Request {
-    private final int floor;
+public class HallRequest {
+    private final int pickupFloor;
     private final Direction direction;
+}
 
-    public Request(int floor, Direction direction) { ... }
-    public int getFloor()           { return floor; }
-    public Direction getDirection() { return direction; }
+public class CabinRequest {
+    private final int destinationFloor;
 }
 
 public class Elevator {
@@ -73,7 +74,8 @@ public class Elevator {
     private final PriorityQueue<Integer> upQueue;   // Min-Heap
     private final PriorityQueue<Integer> downQueue; // Max-Heap
 
-    public void addRequest(int floor, Direction reqDir);
+    public void addHallRequest(HallRequest request);
+    public void addCabinRequest(CabinRequest request);
     public boolean hasRequests();
     public void processNextRequest();
 }
@@ -81,8 +83,8 @@ public class Elevator {
 public class ElevatorController {
     private final List<Elevator> elevators;
 
-    public void dispatch(Request request); // Routes to best elevator by cost score
-    private int calculateCost(Elevator elevator, Request request);
+    public void requestElevator(HallRequest request);
+    private Elevator selectBestElevator(HallRequest request);
 }
 ```
 
@@ -102,14 +104,14 @@ ElevatorController controller = new ElevatorController(List.of(e1, e2));
 
 ### Handle Hall Call (External)
 ```java
-controller.dispatch(new Request(3, Direction.UP));
-// → Scores each elevator by distance + direction compatibility
-// → Assigns to best elevator via controller.dispatch()
+controller.requestElevator(new HallRequest(3, Direction.UP));
+// → Prefers a matching elevator already moving toward floor 3
+// → Otherwise selects the nearest idle elevator, then the nearest fallback
 ```
 
 ### Handle Cabin Call (Internal)
 ```java
-e1.addRequest(8, Direction.IDLE); // passenger inside e1 selects floor 8
+e1.addCabinRequest(new CabinRequest(8)); // passenger inside e1 selects floor 8
 // → Automatically added to upQueue (floor > currentFloor)
 ```
 
@@ -127,12 +129,11 @@ while (systemHasRequests) {
 }
 ```
 
-### ElevatorController Cost Scoring
+### ElevatorController Selection Priorities
 ```
-IDLE elevator                            → cost = distance
-Moving TOWARDS request in same direction → cost = distance       (best match)
-Moving TOWARDS request, opposite dir     → cost = distance + 5
-Already passed the floor                 → cost = distance + 20   (worst match)
+1. Nearest elevator moving toward the pickup floor in the requested direction
+2. Nearest idle elevator
+3. Nearest elevator overall (fallback)
 ```
 
 ---
