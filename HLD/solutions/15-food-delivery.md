@@ -5,7 +5,9 @@
 
 ---
 
-## SECTION 1 — Clarifying Questions (Ask These FIRST in Interview)
+## Step 1 — Requirements (~5 min)
+
+### 1.1 Clarifying Questions (Ask These FIRST)
 
 **Functional Scope:**
 - Search + browse restaurants, view menus?
@@ -13,8 +15,7 @@
 - Multiple items from the same restaurant? Multiple restaurants per order?
 - Restaurant onboarding (menus, availability)?
 - Driver dispatch (similar to Uber)?
-- Payments?
-- Ratings and reviews?
+- Payments? Ratings and reviews?
 
 **Scale:**
 - How many orders per day?
@@ -23,17 +24,12 @@
 
 **Typical Interviewer Answer:**
 - Full scope: browse, order, track delivery in real-time
-- Single restaurant per order (multi-restaurant adds massive complexity)
+- Single restaurant per order
 - 5 million orders per day
-- 500,000 active delivery partners
-- 100,000 restaurant partners
+- 500,000 active delivery partners, 100,000 restaurant partners
 - Peak: dinner time (7–9pm), 3× normal volume
 
----
-
-## SECTION 2 — Functional & Non-Functional Requirements
-
-### Functional Requirements
+### 1.2 Functional Requirements (FR)
 1. Customer searches for restaurants near their location
 2. Customer views restaurant menu and adds items to cart
 3. Customer places order (restaurant receives it)
@@ -42,464 +38,270 @@
 6. Customer tracks delivery partner in real-time
 7. Order delivered, payment processed, ratings collected
 
-### Non-Functional Requirements
+### 1.3 Non-Functional Requirements (NFR)
 | Property | Target |
 |---|---|
 | **Order placement** | < 2 seconds (ACID transaction) |
 | **Delivery tracking** | Real-time, updated every 5 seconds |
 | **Restaurant search** | < 200ms |
-| **Availability** | 99.99% for order placement; 99.9% for tracking |
+| **Availability** | 99.99% for order placement |
 | **Order consistency** | Never lose an order; no duplicate orders |
 
-### Out of Scope
-- Restaurant kitchen management (KMS - kitchen management system)
+### 1.4 Out of Scope
+- Kitchen management system (KMS)
 - Inventory management
-- Multi-restaurant orders / cloud kitchens (mention as extension)
+- Multi-restaurant orders / cloud kitchens
 
 ---
 
-## SECTION 3 — Capacity Estimation
+## Step 2 — Core Entities (~3 min)
 
-### Orders
-- 5M orders/day
-- = 5M / 86,400 ≈ **~58 orders/sec** average
-- Peak (7–9pm): **~175 orders/sec**
-- Average order: 3 items, total ₹350
+### 2.1 Entity Identification
 
-### Location Updates (Delivery Partners)
-- 500K delivery partners
-- Active at peak: 30% = 150K partners
-- Location update every 5 seconds = 150K / 5 = **30,000 location writes/sec**
+```
+┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
+│  Restaurant  │   │  MenuItem    │   │    Order     │   │  Delivery    │
+│              │   │              │   │  (critical)  │   │  Partner     │
+│ restaurant_id│──►│ item_id      │   │ order_id     │   │ partner_id   │
+│ name         │   │ restaurant_id│   │ customer_id  │   │ is_available │
+│ lat, lng     │   │ name, price  │   │ restaurant_id│   │ current_lat  │
+│ cuisines[]   │   │ is_available │   │ partner_id   │   │ current_lng  │
+│ rating       │   │ category     │   │ status       │   │ rating       │
+│ is_open      │   └──────────────┘   │ items (JSONB)│   └──────────────┘
+└──────────────┘                      │ total_price  │
+                                      │ payment_ref  │
+                                      └──────────────┘
+```
 
-### Read vs Write
-- Restaurant searches: heavily read-heavy (1000:1 vs orders)
-- Menu views: ~10× more than orders
-- Order processing: write-heavy during 7–9pm peak
+**Primary entities**: `Restaurant` (discovery), `MenuItem` (catalog), `Order` (critical ACID state machine), `DeliveryPartner` (real-time location tracking, like Uber drivers).
 
-### Storage
-- Order record: 2 KB (items, addresses, timestamps)
-- 5M/day × 365 × 2 KB = **~3.6 TB/year** (manageable)
-- Restaurant menus: 100K restaurants × 50 items × 500 bytes = **~2.5 GB** (tiny, fully cacheable)
+### 2.2 Data Model / Schema
+
+**Table 1: `orders` (Critical ACID table)** — PostgreSQL
+```
+order_id, customer_id, restaurant_id, delivery_partner_id NULL,
+status ENUM('pending','confirmed','preparing','ready','picked_up','out_for_delivery','delivered','cancelled'),
+items JSONB, delivery_address JSONB, total_price DECIMAL,
+payment_status, payment_ref, created_at, delivered_at
+```
+
+**Table 2: `restaurants`** — PostgreSQL + PostGIS (geo queries)
+
+**Table 3: `menu_items`** — PostgreSQL (read via Redis cache, 250 MB total)
+
+**Table 4: `delivery_partner_locations`** — Redis Geo (same as Uber)
+
+> 🎯 **NFR addressed**: **Order consistency** — PostgreSQL ACID for orders. **Restaurant search < 200ms** — Elasticsearch for geo+text; Redis cache. **Delivery tracking** — Redis Geo for real-time partner positions.
 
 ---
 
-## SECTION 4 — API Design
+## Step 3 — API or Interface (~5 min)
 
-### 1. Search Restaurants
+### 3.1 Search Restaurants
 ```
-GET /api/v1/restaurants/search?lat=12.97&lng=77.59&radius=5&cuisine=indian&limit=20
-Response: {
-  "restaurants": [
-    {
-      "restaurant_id": "r1",
-      "name": "Biryani House",
-      "cuisine": ["Indian", "Biryani"],
-      "rating": 4.5,
-      "delivery_time_min": 35,
-      "min_order_value": 150,
-      "is_open": true,
-      "distance_km": 1.2
-    }
-  ]
-}
+GET /api/v1/restaurants/search?lat=12.97&lng=77.59&radius=5&cuisine=indian
+Response: { "restaurants": [ { restaurant_object } ] }
 ```
 
-### 2. Get Restaurant Menu
+### 3.2 Get Menu
 ```
 GET /api/v1/restaurants/{restaurant_id}/menu
-Response: {
-  "restaurant_id": "r1",
-  "categories": [
-    { "name": "Biryani", "items": [
-      { "item_id": "i1", "name": "Chicken Biryani", "price": 199, "is_available": true }
-    ]}
-  ]
-}
+Response: { "categories": [ { "name": "Biryani", "items": [ ... ] } ] }
 ```
 
-### 3. Place Order
+### 3.3 Place Order
 ```
 POST /api/v1/orders
-Authorization: Bearer <token>
-{
-  "restaurant_id": "r1",
-  "items": [ { "item_id": "i1", "quantity": 2 }, { "item_id": "i5", "quantity": 1 } ],
-  "delivery_address": { "lat": 12.97, "lng": 77.59, "formatted": "123 MG Road, Bangalore" },
-  "payment_method": "card",
-  "payment_token": "stripe_tok_xyz"
-}
-
-Response 201:
-{
-  "order_id": "ORD-12345",
-  "status": "confirmed",
-  "estimated_delivery_time": "2025-07-26T20:15:00Z",
-  "tracking_url": "https://swiggy.com/track/ORD-12345"
-}
+{ "restaurant_id": "r1", "items": [...], "delivery_address": {...}, "payment_token": "..." }
+Response 201: { "order_id": "ORD-12345", "status": "confirmed", "estimated_delivery_time": "..." }
 ```
 
-### 4. Track Order
+### 3.4 Track Order
 ```
 GET /api/v1/orders/{order_id}/track
-Response: {
-  "order_id": "ORD-12345",
-  "status": "out_for_delivery",
-  "delivery_partner": { "name": "Ravi K.", "phone": "+91-9876543210" },
-  "partner_location": { "lat": 12.975, "lng": 77.595 },
-  "eta_minutes": 8
-}
+Response: { "status": "out_for_delivery", "partner_location": {...}, "eta_minutes": 8 }
 ```
 
-### 5. Restaurant confirms order (Restaurant App API)
-```
-PUT /api/v1/orders/{order_id}/status
-Authorization: Bearer <restaurant_token>
-{ "status": "preparing", "estimated_ready_minutes": 20 }
-```
+> 🎯 **NFR addressed**: **Order placement < 2s** — synchronous ACID write with payment authorization. **Availability** — restaurant search heavily cached.
 
 ---
 
-## SECTION 5 — Data Model & Database Choice
+## Step 4 — Data Flow (~3 min)
 
-### Table 1: `restaurants`
-```
-restaurant_id   BIGINT       PRIMARY KEY
-name            VARCHAR(200)
-owner_user_id   BIGINT
-lat             DOUBLE
-lng             DOUBLE
-geohash         VARCHAR(10)  -- for geo queries
-cuisines        TEXT[]
-rating          FLOAT
-is_open         BOOLEAN
-min_order_value DECIMAL
-avg_prep_time_min INT
-```
-**DB**: PostgreSQL + PostGIS for geospatial queries
+### 4.1 Capacity Estimation (Back-of-Envelope)
 
-### Table 2: `menu_items`
-```
-item_id         BIGINT       PRIMARY KEY
-restaurant_id   BIGINT
-category        VARCHAR(100)
-name            VARCHAR(200)
-price           DECIMAL
-is_available    BOOLEAN
-description     TEXT
-```
-**DB**: PostgreSQL (read via cache)
+**Orders:** 5M/day = **~58 orders/sec** avg; peak: **~175/sec**
 
-### Table 3: `orders` (Critical ACID table)
-```
-order_id        BIGINT       PRIMARY KEY (Snowflake)
-customer_id     BIGINT
-restaurant_id   BIGINT
-delivery_partner_id BIGINT  NULL (assigned after dispatch)
-status          ENUM('pending', 'confirmed', 'preparing', 'ready', 'picked_up', 'out_for_delivery', 'delivered', 'cancelled')
-items           JSONB        -- snapshot of items + prices at order time
-delivery_address JSONB
-total_price     DECIMAL
-platform_fee    DECIMAL
-payment_status  ENUM('pending', 'paid', 'refunded')
-payment_ref     VARCHAR
-estimated_delivery TIMESTAMP
-created_at      TIMESTAMP
-confirmed_at    TIMESTAMP
-picked_up_at    TIMESTAMP
-delivered_at    TIMESTAMP
-```
-**DB**: **PostgreSQL** (ACID, never lose an order)
+**Location Updates:** 150K active partners × update/5s = **30,000 writes/sec**
 
-### Table 4: `delivery_partner_locations` (Real-time)
+**Storage:** Orders ~3.6 TB/year; menus ~2.5 GB total (fully cacheable)
+
+### 4.2 Data Flow Through System
+
+**Order Flow (Saga Pattern):**
 ```
-Not in PostgreSQL. Stored in Redis Geo (same as Uber):
-GEOADD partners:available:bangalore 77.59 12.97 partner_id
+Customer places order → Order Service (PostgreSQL ACID)
+  → Authorize payment (Stripe hold)
+  → Notify restaurant (Kafka → push notification)
+  → Restaurant confirms → status: PREPARING
+  → Dispatch Service triggered → find nearest delivery partner (Redis Geo)
+  → Partner accepts → status: PICKED_UP
+  → Real-time tracking: Kafka → Redis Pub/Sub → WebSocket to customer
+  → Partner delivers → status: DELIVERED → payment captured
 ```
 
-### Table 5: `ratings`
-```
-rating_id       BIGINT       PRIMARY KEY
-order_id        BIGINT       UNIQUE
-customer_id     BIGINT
-restaurant_id   BIGINT
-partner_id      BIGINT
-food_rating     INT          (1-5)
-delivery_rating INT          (1-5)
-comment         TEXT
-```
-**DB**: PostgreSQL (append-only, moderate volume)
+> 🎯 **NFR addressed**: **Order consistency** — Saga pattern with compensating transactions. **Delivery tracking** — Kafka → WebSocket pipeline.
 
 ---
 
-## SECTION 6 — High-Level Architecture
+## Step 5 — High-level Design (~10 min)
+
+### 5.1 Architecture Diagram
 
 ```
                     ┌────────────────────────────────────────┐
-                    │      CUSTOMER APP / RESTAURANT APP     │
+                    │  CUSTOMER APP / RESTAURANT APP          │
                     └──────────────────┬─────────────────────┘
                                        │
                                ┌───────▼────────┐
                                │   API Gateway  │
-                               │  (Auth + RL)   │
                                └───────┬────────┘
                                        │
      ┌─────────────────────────────────┼──────────────────────────────────┐
      │                                 │                                  │
 ┌────▼───────────┐    ┌────────────────▼──────┐           ┌──────────────▼──────┐
 │ Search Service │    │   Order Service       │           │ Delivery Service    │
-│ (restaurant    │    │   (place, track,      │           │ (dispatch, track    │
-│  discovery)    │    │    manage orders)     │           │  delivery partner)  │
-└────┬───────────┘    └───────────┬───────────┘           └──────────────┬──────┘
-     │                           │                                       │
-     │                           │                                       │
-┌────▼──────────────┐    ┌───────▼────────┐               ┌─────────────▼──────┐
-│ Elasticsearch     │    │  PostgreSQL    │               │ Redis Geo Index     │
-│ Restaurant index  │    │  Orders        │               │ partners:available  │
-│ Geospatial +      │    │  (ACID)        │               │ (partner locations) │
-│ Full-text search  │    └───────┬────────┘               └────────────────────┘
-└───────────────────┘            │
-                                 │
-                         ┌───────▼────────┐
-                         │  Kafka         │
-                         │  order_events  │
-                         └───────┬────────┘
-                                 │
-         ┌───────────────────────┼─────────────────────────────┐
-         │                       │                             │
-┌────────▼──────┐    ┌───────────▼──────┐         ┌───────────▼─────────┐
-│ Restaurant    │    │  Dispatch         │         │ Notification Svc    │
-│ Notification  │    │  Service          │         │ (customer SMS/push  │
-│ (push to      │    │  (find nearest    │         │  order updates)     │
-│  Restaurant   │    │  partner, assign) │         └─────────────────────┘
-│  App)         │    └──────────────────┘
-└───────────────┘
+│ (Elasticsearch)│    │   (PostgreSQL ACID)   │           │ (Redis Geo + Kafka) │
+└────────────────┘    └───────────┬───────────┘           └─────────────────────┘
+                                  │
+                          ┌───────▼────────┐
+                          │  Kafka         │
+                          │  order_events  │
+                          └───────┬────────┘
+                                  │
+         ┌────────────────────────┼──────────────────────┐
+         │                        │                      │
+  Restaurant Notif          Dispatch Service       Customer Notif
+  (push to app)        (find nearest partner)     (SMS/push updates)
 
-┌────────────────────────────────────────────────────────┐
-│ Real-time Tracking (WebSocket / SSE)                   │
-│ Delivery partner location → Kafka → Redis Pub/Sub      │
-│ → Customer app WebSocket (live map update every 5s)    │
-└────────────────────────────────────────────────────────┘
-
-┌────────────────────────────────────────────────────────┐
-│ Menu Cache (Redis)                                      │
-│ All restaurant menus cached (1 hour TTL)               │
-│ 100K restaurants × 2.5 KB = 250 MB (tiny)             │
-│ Restaurant updates menu → invalidate cache             │
-└────────────────────────────────────────────────────────┘
+  Real-time Tracking: partner location → Kafka → Redis Pub/Sub → WebSocket
+  Menu Cache: Redis (250 MB, 1-hour TTL)
 ```
+
+### 5.2 Component Walkthrough
+
+| Component | Role | Why This Choice |
+|---|---|---|
+| **Search Service** | Restaurant discovery (geo + text + rating) | Elasticsearch for combined relevance scoring |
+| **Order Service** | Order lifecycle with ACID guarantees | PostgreSQL; Saga pattern for distributed workflow |
+| **Delivery Service** | Partner dispatch + real-time tracking | Redis Geo (same as Uber); WebSocket for live map |
+| **Kafka** | Event bus for order state changes | Decouples order service from notification/dispatch |
+| **Menu Cache** | Redis-cached restaurant menus | 2.5 GB total; eliminates DB reads for 99% of menu views |
+
+> 🎯 **NFR addressed**: **Order placement < 2s** — ACID + async Kafka for downstream. **Restaurant search < 200ms** — Elasticsearch + Redis cache. **Delivery tracking** — WebSocket with 5s updates. **Availability 99.99%** — each service independently scalable.
 
 ---
 
-## SECTION 7 — Deep Dives
+## Step 6 — Deep Dives (~15 min)
 
 ### Deep Dive 1: Order State Machine
 
-This is crucial for food delivery. The order goes through a strict sequence:
-
 ```
 PENDING → CONFIRMED → PREPARING → READY → PICKED_UP → OUT_FOR_DELIVERY → DELIVERED
-                                                                        ↘ FAILED
-At any point: → CANCELLED (with rules: can't cancel after PICKED_UP)
+At any point: → CANCELLED (can't cancel after PICKED_UP)
 
-Each state transition triggers:
-  PENDING → CONFIRMED:
-    - Restaurant app notified (push notification)
-    - Payment authorized (hold on card, not charged yet)
-
-  CONFIRMED → PREPARING:
-    - Restaurant taps "Start Cooking"
-    - Dispatch Service notified to find delivery partner
-
-  PREPARING → READY:
-    - Restaurant taps "Ready for Pickup"
-    - Delivery partner gets notification to head to restaurant
-    - Payment captured (charged to customer)
-
-  READY → PICKED_UP:
-    - Driver taps "Picked Up"
-    - Customer gets "Your food is on the way!" notification
-
-  PICKED_UP → DELIVERED:
-    - Driver taps "Delivered"
-    - Rating prompt shown to customer
-    - Driver payout initiated
-
-State stored in PostgreSQL. State transitions are atomic DB updates with validation.
+Each transition triggers downstream actions:
+  CONFIRMED: Restaurant notified, payment authorized
+  PREPARING: Dispatch Service finds delivery partner
+  READY: Partner notified to head to restaurant; payment captured
+  PICKED_UP: Customer gets "food is on the way!" notification
+  DELIVERED: Rating prompt; driver payout initiated
 ```
 
 ---
 
-### Deep Dive 2: Restaurant Search (Geo + Relevance)
+### Deep Dive 2: Restaurant Search (Elasticsearch)
 
-**What customer needs**: restaurants within 5km radius, serving their cuisine preference, currently open, ranked by relevance.
-
-**Solution: Elasticsearch (ES)**
 ```
-Index: restaurants
-Document: {
-  restaurant_id, name, cuisines, rating, is_open,
-  avg_delivery_time, min_order,
-  location: { "lat": 12.97, "lon": 77.59 }   // ES geo_point
-}
+Elasticsearch query combining:
+  - geo_distance filter (within 5km)
+  - is_open filter
+  - cuisine text match (relevance scoring)
+  - Sort by: _score + rating + proximity
 
-Query:
-{
-  "query": {
-    "bool": {
-      "filter": [
-        { "geo_distance": { "distance": "5km", "location": { "lat": 12.97, "lon": 77.59 } } },
-        { "term": { "is_open": true } }
-      ],
-      "should": [
-        { "match": { "cuisines": "biryani" } },       // text relevance
-        { "term": { "cuisines": "indian" } }
-      ]
-    }
-  },
-  "sort": [
-    "_score",                    // text relevance first
-    { "rating": { "order": "desc" } },
-    "_geo_distance"              // then by proximity
-  ]
-}
+Cache: top city+cuisine combinations in Redis (5-min TTL)
 ```
-
-**Cache**: Top searches (city + cuisine combinations) cached in Redis with 5-min TTL.
 
 ---
 
-### Deep Dive 3: Delivery Dispatch (Finding Nearest Partner)
+### Deep Dive 3: Delivery Dispatch
 
 ```
-Trigger: Order status → PREPARING (restaurant started cooking)
-
-Dispatch Service:
-  1. Get restaurant location (lat, lng)
-  2. GEORADIUS partners:available:{city} {restaurant_lat} {restaurant_lng} 3km COUNT 10 ASC
-     → Returns 10 nearest available delivery partners within 3km
-
-  3. Filter: check if partner is not already at max orders (≤1 order at a time for MVP)
-
-  4. Calculate ETA to restaurant for each candidate:
-     → Google Maps Distance Matrix API (batch ETA for all candidates)
-
-  5. Rank: partner with lowest ETA to restaurant wins
-
-  6. Send ride offer to partner app (push notification)
-     → Partner has 30 seconds to accept
-     → If rejected: try next candidate
-
-  7. On acceptance:
-     → GEOREM partners:available:{city} {partner_id}  (mark as unavailable)
-     → UPDATE orders SET delivery_partner_id = {id} WHERE order_id = ?
-
-  8. If no partner found within 3km: expand radius to 6km, retry
+Trigger: Order status → PREPARING
+1. GEORADIUS partners:available:{city} {restaurant_lat} {restaurant_lng} 3km
+2. Filter: partner not at max orders
+3. Rank by ETA to restaurant (Google Maps API)
+4. Send offer → 30s to accept → if rejected, try next
+5. On accept: mark unavailable, assign to order
+6. If no partner in 3km → expand to 6km
 ```
 
 ---
 
 ### Deep Dive 4: ETA Estimation
 
-ETA is critical for customer trust. A bad ETA = a bad experience.
-
-**Two-part ETA:**
 ```
 Total ETA = Preparation Time + Pickup Time + Delivery Time
-
-Preparation Time:
-  - Restaurant provides avg_prep_time_min (stored in DB)
-  - ML model adjusts based on: current queue at restaurant, time of day, item count
-  - Updated in real-time as order flows through system
-
-Pickup Time:
-  - Google Maps API: time for partner to travel from current position → restaurant
-  - Updated live as partner moves
-
-Delivery Time:
-  - Google Maps API: time from restaurant → customer address
-  - Adjusted for current traffic conditions
-
-ETA updates pushed to customer via WebSocket every 2 minutes or on significant change (>5 min).
+  - Prep time: ML model based on restaurant queue, time of day, item count
+  - Pickup: Google Maps (partner → restaurant)
+  - Delivery: Google Maps (restaurant → customer)
+  - Updated live via WebSocket every 2 minutes
 ```
 
 ---
 
-### Deep Dive 5: Handling Order Failures & Refunds
+### Deep Dive 5: Order Failure Handling (Saga Pattern)
 
-**Scenario 1: Restaurant cancels order** (out of stock)
 ```
-ORDER: CONFIRMED → CANCELLED
-  → Payment authorization voided (not charged)
-  → Customer notified + refund issued
-  → System attempts to find alternative restaurant (optional)
-```
+Saga: Place order → Authorize payment → Notify restaurant
+  If payment fails: cancel order (compensating transaction)
+  If restaurant rejects: void payment, cancel order
 
-**Scenario 2: Delivery partner can't deliver** (accident, breakdown)
-```
-ORDER: OUT_FOR_DELIVERY → ASSIGNED NEW PARTNER
-  → Dispatch Service assigns new partner
-  → Customer notified: "Your delivery partner changed, slight delay"
-  → ETA recalculated
-```
-
-**Scenario 3: Customer claims non-delivery** (driver marked delivered but food not received)
-```
-Cross-check:
-  - Was partner's GPS near delivery address at time of marking delivered?
-  - Did customer's phone GPS show them at home?
-  - Photo proof of delivery (optional feature)
-→ If fraud suspected: flag for manual review
-→ Default: trust customer, issue refund, flag partner
-```
-
-**Payment rollback pattern:**
-```
-Order placement uses Saga Pattern (compensating transactions):
-  1. Place order (PostgreSQL)
-  2. Authorize payment (Stripe)
-  3. Notify restaurant (Kafka)
-
-If step 2 fails: undo step 1 (cancel order in DB)
-If step 3 fails: void payment, cancel order
-Each step has a defined compensating action.
+Restaurant cancels (out of stock): void auth, refund, notify customer
+Partner can't deliver: assign new partner, recalculate ETA
+Customer claims non-delivery: GPS cross-check, default trust customer
 ```
 
 ---
 
-## SECTION 8 — Trade-offs & Alternatives
+### Trade-offs & Alternatives
 
-### CAP Theorem Position
-- **CP for orders**: Never lose an order. PostgreSQL with ACID guarantees.
-- **AP for restaurant search**: Slightly stale Elasticsearch index is acceptable.
-- **AP for delivery tracking**: Eventual consistency in partner location (5s lag is fine).
+**CAP Theorem Position:**
+- **CP for orders** — PostgreSQL ACID; never lose an order
+- **AP for search** — slightly stale Elasticsearch index is acceptable
+- **AP for tracking** — eventual consistency in partner location (5s lag fine)
 
-### Key Trade-offs Table
+**Key Trade-offs Table:**
 
 | Decision | Choice | Alternative | Reasoning |
 |---|---|---|---|
-| Restaurant search | Elasticsearch | PostgreSQL PostGIS + full-text | ES handles combined geo + text relevance search better; PostGIS is more accurate but harder to rank |
-| Order DB | PostgreSQL | Cassandra | Orders are financial records requiring ACID; Cassandra's eventual consistency is unsuitable |
-| Real-time tracking | Kafka + Redis Pub/Sub + WebSocket | Polling | WebSocket gives < 1s lag; polling every 5s feels janky |
-| Partner dispatch | Geo-proximity + ETA ranking | Pure proximity | ETA considers traffic; pure proximity can assign a far-but-fast partner over a close-but-stuck one |
-| Order failure handling | Saga Pattern | 2PC (Two-Phase Commit) | 2PC is slow and not suitable for microservices; Saga with compensating transactions is the modern approach |
-
-### What Would You Do Differently at Larger Scale?
-- **Slot-based delivery windows**: for grocery delivery, offer 30-min slots instead of live tracking
-- **Route optimization**: assign multiple consecutive deliveries to same partner (DoorDash's approach)
-- **Kitchen queue management**: predict restaurant overload, delay dispatch, auto-expand delivery radius
-- **Dark stores**: micro-warehouses for 10-min delivery of groceries/essentials
+| Restaurant search | Elasticsearch | PostGIS + full-text | ES handles combined geo + text relevance better |
+| Order DB | PostgreSQL | Cassandra | Orders need ACID; Cassandra's eventual consistency unsuitable |
+| Real-time tracking | Kafka + WebSocket | Polling | WebSocket < 1s lag; polling feels janky |
+| Partner dispatch | Geo + ETA ranking | Pure proximity | ETA considers traffic conditions |
+| Order failure | Saga Pattern | 2PC | Saga is modern, microservice-friendly |
 
 ---
 
-## Interview Flow Summary (Talk Track)
+### Summary Talk Track
 
-1. "Food delivery has 3 distinct systems: **restaurant discovery**, **order management (ACID)**, and **delivery dispatch + tracking** (same as Uber)"
-2. "Restaurant search uses **Elasticsearch** for geo + text relevance — cached heavily for popular city+cuisine combos"
-3. "Order placement is a **Saga pattern**: place order → authorize payment → notify restaurant (each step has compensation)"
-4. "Order state machine: PENDING → CONFIRMED → PREPARING → READY → PICKED_UP → DELIVERED"
-5. "Dispatch: **Redis Geo + ETA ranking** — find nearest available partner, send offer, retry if rejected"
-6. "Tracking: **Kafka → Redis Pub/Sub → WebSocket** — customer sees partner move every 5 seconds"
-7. "CAP: CP for orders (ACID PostgreSQL), AP for search and tracking"
+1. "Food delivery has 3 distinct systems: **restaurant discovery**, **order management (ACID)**, and **delivery dispatch + tracking**."
+2. "Core entities: **Restaurant**, **MenuItem**, **Order** (critical state machine), **DeliveryPartner** (real-time location)."
+3. "Restaurant search: **Elasticsearch** for geo + text relevance — cached heavily."
+4. "Order placement: **Saga pattern** — place → authorize payment → notify restaurant (each step has compensation)."
+5. "Order state machine: PENDING → CONFIRMED → PREPARING → READY → PICKED_UP → DELIVERED."
+6. "Dispatch: **Redis Geo + ETA ranking** — find nearest partner, send offer, retry if rejected."
+7. "Tracking: **Kafka → Redis Pub/Sub → WebSocket** — customer sees partner every 5 seconds."
 
 ---
 

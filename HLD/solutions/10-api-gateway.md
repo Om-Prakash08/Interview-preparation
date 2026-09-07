@@ -5,7 +5,9 @@
 
 ---
 
-## SECTION 1 — Clarifying Questions (Ask These FIRST in Interview)
+## Step 1 — Requirements (~5 min)
+
+### 1.1 Clarifying Questions (Ask These FIRST)
 
 **Functional Scope:**
 - Does the gateway need to handle authentication and authorization?
@@ -27,11 +29,7 @@
 - 500+ backend microservices
 - Gateway adds < 10ms overhead to each request
 
----
-
-## SECTION 2 — Functional & Non-Functional Requirements
-
-### Functional Requirements
+### 1.2 Functional Requirements (FR)
 1. **Request Routing**: Route incoming request to the correct backend microservice
 2. **Authentication & Authorization**: Validate JWT tokens / API keys
 3. **Rate Limiting**: Per client, per endpoint rate limits
@@ -42,7 +40,7 @@
 8. **API Versioning**: Route `/v1/users` and `/v2/users` to different service versions
 9. **Request Transformation**: Modify headers, add correlation IDs, strip internal fields from responses
 
-### Non-Functional Requirements
+### 1.3 Non-Functional Requirements (NFR)
 | Property | Target |
 |---|---|
 | **Throughput** | 1 million requests/sec |
@@ -51,86 +49,47 @@
 | **Scalability** | Horizontally scalable, stateless |
 | **Security** | Prevent injection, validate all inputs at edge |
 
-### Out of Scope
+### 1.4 Out of Scope
 - Service mesh (Istio) — that handles east-west traffic; gateway handles north-south (external traffic)
 - GraphQL federation
 - API monetization / billing per call
 
 ---
 
-## SECTION 3 — Capacity Estimation
+## Step 2 — Core Entities (~3 min)
 
-### Traffic
-- 1 million requests/sec peak
-- Average request/response size: 2 KB
-- Gateway bandwidth: 1M × 2 KB = **2 GB/s** (significant — need high-bandwidth NICs)
+### 2.1 Entity Identification
 
-### Gateway Instances
-- Single gateway instance: ~50,000 req/sec (Nginx/Envoy can do this)
-- Needed: 1M / 50K = **20 gateway instances** minimum
-- With 2× headroom for failures: **40 instances**
-
-### Auth Validation
-- JWT validation: ~0.1ms (cryptographic signature check, CPU-bound)
-- 1M req/sec × 0.1ms = 100 CPU-seconds/sec → needs high-core gateway nodes
-
-### Rate Limit Checks
-- 1M req/sec → 1M Redis lookups/sec
-- Redis Cluster: 1M ops/sec feasible with 10-20 nodes
-
----
-
-## SECTION 4 — API Design (of the Gateway's Management API)
-
-### The Gateway itself doesn't have an end-user API — it proxies all APIs.
-### But it has an internal Management API for configuration:
-
-### 1. Register a Route
 ```
-POST /admin/routes
-{
-  "path_prefix": "/api/v1/users",
-  "backend_service": "user-service",
-  "methods": ["GET", "POST", "PUT"],
-  "auth_required": true,
-  "rate_limit": { "requests": 100, "window": "1m" }
-}
-Response: { "route_id": "route_abc", "created_at": "..." }
+┌──────────────────┐      ┌──────────────────┐      ┌──────────────────┐
+│  Route           │      │  BackendService  │      │  ServiceInstance │
+│                  │      │                  │      │                  │
+│  route_id        │──────│  service_name    │──────│  host            │
+│  path_prefix     │      │  health_check    │      │  port            │
+│  methods[]       │      │  lb_algorithm    │      │  is_healthy      │
+│  backend_service │      │  circuit_breaker │      │  last_checked    │
+│  auth_required   │      │    _threshold    │      │                  │
+│  rate_limit_rpm  │      └──────────────────┘      └──────────────────┘
+│  version         │
+└──────────────────┘      ┌──────────────────┐
+                          │  RequestLog      │
+                          │                  │
+                          │  request_id      │
+                          │  timestamp       │
+                          │  client_ip       │
+                          │  path, method    │
+                          │  response_code   │
+                          │  latency_ms      │
+                          └──────────────────┘
 ```
 
-### 2. Register a Backend Service
-```
-POST /admin/services
-{
-  "service_name": "user-service",
-  "instances": [
-    { "host": "user-svc-1.internal", "port": 8080 },
-    { "host": "user-svc-2.internal", "port": 8080 }
-  ],
-  "health_check_path": "/health",
-  "circuit_breaker": { "threshold": 50, "timeout_sec": 30 }
-}
-```
+**Primary entities**: `Route` (maps path → backend service), `BackendService` (service metadata + health config), `ServiceInstance` (individual running instance), `RequestLog` (observability record).
 
-### 3. Get Gateway Metrics
-```
-GET /admin/metrics
-Response: {
-  "rps": 984231,
-  "p50_latency_ms": 4.2,
-  "p99_latency_ms": 18.5,
-  "error_rate": 0.001,
-  "active_connections": 284000
-}
-```
+### 2.2 Data Model / Schema
 
----
-
-## SECTION 5 — Data Model
-
-### Config Store (Route Rules)
+**Config Store (Route Rules) — PostgreSQL:**
 ```
-routes table (PostgreSQL):
+routes table:
   route_id         UUID      PRIMARY KEY
   path_prefix      VARCHAR   UNIQUE
   backend_service  VARCHAR
@@ -156,24 +115,104 @@ instances table:
 
 **All config loaded into memory on startup, refreshed every 30 seconds.**
 
-### Request Log (Observability)
+**Request Log (Observability) — ClickHouse / Elasticsearch:**
 ```
-request_logs (Clickhouse / Elasticsearch):
-  request_id      VARCHAR
-  timestamp       TIMESTAMP
-  client_ip       VARCHAR
-  method          VARCHAR
-  path            VARCHAR
-  backend_service VARCHAR
-  response_code   INT
-  latency_ms      FLOAT
-  user_id         VARCHAR
+request_id, timestamp, client_ip, method, path, backend_service,
+response_code, latency_ms, user_id
 ```
 Written async via Kafka (never on critical path).
 
+> 🎯 **NFR addressed**: **Gateway Latency < 10ms** — config loaded in-memory, never queried per-request. **Availability** — gateway continues with cached config even if Config DB goes down. **Security** — route rules enforce auth requirements at the edge.
+
 ---
 
-## SECTION 6 — High-Level Architecture
+## Step 3 — API or Interface (~5 min)
+
+The gateway itself doesn't have an end-user API — it **proxies** all APIs. But it has an internal **Management API** for configuration:
+
+### 3.1 Register a Route
+```
+POST /admin/routes
+{
+  "path_prefix": "/api/v1/users",
+  "backend_service": "user-service",
+  "methods": ["GET", "POST", "PUT"],
+  "auth_required": true,
+  "rate_limit": { "requests": 100, "window": "1m" }
+}
+Response: { "route_id": "route_abc", "created_at": "..." }
+```
+
+### 3.2 Register a Backend Service
+```
+POST /admin/services
+{
+  "service_name": "user-service",
+  "instances": [
+    { "host": "user-svc-1.internal", "port": 8080 },
+    { "host": "user-svc-2.internal", "port": 8080 }
+  ],
+  "health_check_path": "/health",
+  "circuit_breaker": { "threshold": 50, "timeout_sec": 30 }
+}
+```
+
+### 3.3 Get Gateway Metrics
+```
+GET /admin/metrics
+Response: {
+  "rps": 984231,
+  "p50_latency_ms": 4.2,
+  "p99_latency_ms": 18.5,
+  "error_rate": 0.001,
+  "active_connections": 284000
+}
+```
+
+> 🎯 **NFR addressed**: **Throughput** — management API is separate from traffic path; no impact on request processing. **Scalability** — route changes propagate to all gateway instances via config refresh.
+
+---
+
+## Step 4 — Data Flow (~3 min)
+
+### 4.1 Capacity Estimation (Back-of-Envelope)
+
+**Traffic:**
+- 1 million requests/sec peak
+- Average request/response size: 2 KB
+- Gateway bandwidth: 1M × 2 KB = **2 GB/s** (significant — need high-bandwidth NICs)
+
+**Gateway Instances:**
+- Single gateway instance: ~50,000 req/sec (Nginx/Envoy can do this)
+- Needed: 1M / 50K = **20 gateway instances** minimum
+- With 2× headroom for failures: **40 instances**
+
+**Auth Validation:**
+- JWT validation: ~0.1ms (cryptographic signature check, CPU-bound)
+- 1M req/sec × 0.1ms = 100 CPU-seconds/sec → needs high-core gateway nodes
+
+### 4.2 Data Flow Through System — Request Pipeline
+
+```
+EVERY REQUEST passes through these stages IN ORDER:
+
+STAGE 1: SSL Termination → Decrypt TLS, internal HTTP/2
+STAGE 2: Request Parsing → Extract method/path/headers, add X-Request-ID
+STAGE 3: Authentication → Validate JWT signature, extract user_id/permissions
+STAGE 4: Rate Limiting → Check Redis counter, reject 429 if over limit
+STAGE 5: Routing → Match path against in-memory prefix trie → target service
+STAGE 6: Load Balancing → Select instance (round-robin or least connections)
+STAGE 7: Response Processing → Strip internal headers, set CORS, compress
+STAGE 8: Logging (Async) → Publish to Kafka → ClickHouse
+```
+
+> 🎯 **NFR addressed**: **Gateway Latency < 10ms** — each stage is sub-ms; 8 stages total well under budget. **Security** — auth + validation at edge before requests reach backends.
+
+---
+
+## Step 5 — High-level Design (~10 min)
+
+### 5.1 Architecture Diagram
 
 ```
                   EXTERNAL CLIENTS
@@ -198,8 +237,7 @@ Written async via Kafka (never on critical path).
 ┌────▼────────┐    ┌───────▼─────────┐     ┌────────▼────────┐
 │  Gateway 1  │    │   Gateway 2     │     │   Gateway N     │
 │  (Stateless)│    │   (Stateless)   │     │   (Stateless)   │
-│             │    │                 │     │                 │
-│ Pipeline:   │    │  Same pipeline  │     │  Same pipeline  │
+│  Pipeline:  │    │  Same pipeline  │     │  Same pipeline  │
 │ 1. SSL Term │    │                 │     │                 │
 │ 2. Auth     │    │                 │     │                 │
 │ 3. Rate Lmt │    │                 │     │                 │
@@ -225,62 +263,24 @@ Written async via Kafka (never on critical path).
      └───────────────┘  └────────────────┘  └──────────────────┘
 ```
 
----
+### 5.2 Component Walkthrough
 
-## SECTION 7 — Deep Dives
+| Component | Role | Why This Choice |
+|---|---|---|
+| **DNS Load Balancer** | Geo-routes clients to nearest region | Reduces latency for global users |
+| **L4 Load Balancer** | TCP-level distribution across gateway instances | No HTTP parsing overhead; pure network distribution |
+| **Gateway Instances** | Stateless request pipeline (auth, RL, route, LB, log) | Identical instances; add/remove for horizontal scaling |
+| **Config DB (Postgres)** | Stores route rules and service registry | Loaded in-memory; DB only for persistence and admin API |
+| **Redis Cluster** | Rate limit counters + JWT validation cache | Shared state across gateway instances for global accuracy |
+| **Kafka → ClickHouse** | Async request logging and analytics | Never on critical path; Kafka buffers spikes |
 
-### Deep Dive 1: Request Processing Pipeline
-
-Every request passes through these stages IN ORDER. Each stage either allows or rejects the request:
-
-```
-STAGE 1: SSL Termination
-  - Decrypt TLS at gateway
-  - Internal communication uses HTTP/2 (faster, multiplexed)
-  - Certificate management: Let's Encrypt or AWS ACM (auto-renewed)
-
-STAGE 2: Request Parsing & Validation
-  - Extract: method, path, headers, client IP
-  - Validate: content-type, body size (reject oversized payloads)
-  - Add correlation ID: generate UUID, add as X-Request-ID header
-    (traces the request through all microservices)
-
-STAGE 3: Authentication
-  - Extract JWT from Authorization: Bearer <token>
-  - Validate JWT signature (using public key, cached in memory)
-  - Extract user_id and permissions from JWT claims
-  - If invalid: reject with 401 Unauthorized immediately
-  - Cache validated tokens in Redis for 60 seconds (avoid re-validating same token)
-
-STAGE 4: Rate Limiting
-  - Check Redis counter for this user + endpoint
-  - If over limit: reject with 429 Too Many Requests + Retry-After header
-  - Increment counter (see Rate Limiter solution for algorithm details)
-
-STAGE 5: Routing
-  - Match request path + method against route table (in-memory, O(log N) prefix trie)
-  - Identify target backend service
-  - Check circuit breaker state for that service
-
-STAGE 6: Load Balancing
-  - Select an instance of the target service (round-robin or least connections)
-  - Forward request via HTTP/2 multiplexed connection (connection pool to each service)
-
-STAGE 7: Response Processing
-  - Receive response from backend
-  - Strip internal headers (X-Internal-User, X-Debug-Info)
-  - Set CORS headers if needed
-  - Compress response (gzip) if client supports it
-
-STAGE 8: Logging (Async — never blocks response)
-  - Publish request log event to Kafka
-  - ClickHouse consumer writes to analytics store
-  - Grafana dashboards built on ClickHouse
-```
+> 🎯 **NFR addressed**: **Availability 99.999%** — stateless gateways behind LB; any instance can serve any request. **Throughput 1M rps** — 40 instances × 50K rps each. **Gateway Latency < 10ms** — in-memory config, cached JWT, async logging. **Scalability** — add gateway instances linearly.
 
 ---
 
-### Deep Dive 2: JWT Authentication & Caching
+## Step 6 — Deep Dives (~15 min)
+
+### Deep Dive 1: JWT Authentication & Caching
 
 **JWT Validation:**
 ```
@@ -308,7 +308,7 @@ Validation:
 
 ---
 
-### Deep Dive 3: Circuit Breaker
+### Deep Dive 2: Circuit Breaker
 
 **Problem**: If Order Service is down or slow, gateway keeps routing requests there → those requests pile up → gateway's thread pool exhausts → entire gateway slows.
 
@@ -334,7 +334,7 @@ State stored in memory per gateway instance (eventually consistent across fleet 
 
 ---
 
-### Deep Dive 4: Service Discovery
+### Deep Dive 3: Service Discovery
 
 **Problem**: Backend service instances are dynamic — they scale up/down, move between hosts. Gateway can't have static config for each instance.
 
@@ -358,9 +358,7 @@ Gateway caches service registry lookups for 5 seconds (avoids hitting Consul on 
 
 ---
 
-### Deep Dive 5: Observability
-
-**3 pillars of observability** (important to mention at FAANG):
+### Deep Dive 4: Observability (3 Pillars)
 
 **1. Metrics (Prometheus + Grafana)**
 ```
@@ -378,7 +376,6 @@ X-Request-ID (correlation ID) propagated through all hops:
 
 Each service records its own span (start_time, end_time, errors)
 Jaeger collects spans → reconstructs full request trace
-DevOps can see exactly where latency occurs
 ```
 
 **3. Logging (Kafka → ClickHouse)**
@@ -390,15 +387,15 @@ Alerting: PagerDuty triggered if error_rate > 1% for 5 minutes
 
 ---
 
-## SECTION 8 — Trade-offs & Alternatives
+### Trade-offs & Alternatives
 
-### CAP Theorem Position
+**CAP Theorem Position:**
 **AP (Availability + Partition Tolerance)**
 - Gateway must stay available even if Config DB goes down (uses in-memory cached config)
 - Rate limit state can be slightly inconsistent across gateway instances (brief over-limiting acceptable)
 - Circuit breaker state is per-instance (not globally synchronized) — acceptable tradeoff for speed
 
-### Key Trade-offs Table
+**Key Trade-offs Table:**
 
 | Decision | Choice | Alternative | Reasoning |
 |---|---|---|---|
@@ -408,7 +405,7 @@ Alerting: PagerDuty triggered if error_rate > 1% for 5 minutes
 | Config loading | In-memory cache (30s TTL) | Per-request DB lookup | Per-request DB lookup = 1M DB queries/sec — would destroy Config DB |
 | Circuit breaker | Per-instance state | Global distributed state | Global state requires distributed lock (adds latency); per-instance is fast and good enough |
 
-### What Would You Do Differently at Larger Scale?
+**What Would You Do Differently at Larger Scale?**
 - **Service Mesh** (Istio/Envoy) for east-west (service-to-service) traffic, separate from gateway
 - **GraphQL Federation** layer on top of gateway for flexible querying
 - **Edge computing**: run gateway logic at CDN edge (Cloudflare Workers) for < 5ms global latency
@@ -416,16 +413,16 @@ Alerting: PagerDuty triggered if error_rate > 1% for 5 minutes
 
 ---
 
-## Interview Flow Summary (Talk Track)
+### Summary Talk Track
 
-1. "An API Gateway is the **single entry point** for all external traffic — it does auth, rate limiting, routing, and observability"
-2. "Every request goes through a **pipeline**: SSL term → Auth → Rate limit → Route → Load balance → Log"
-3. "Auth: **JWT validated at gateway** (stateless, no DB call needed). Public keys cached from JWKS endpoint."
-4. "Rate limiting: **Redis** shared across all gateway instances for global accuracy"
-5. "Routing: **in-memory prefix trie** updated every 30s from Config DB — never query DB on critical path"
-6. "Circuit breaker prevents **cascading failures**: if a backend is sick, reject requests fast instead of letting them pile up"
-7. "Observability: metrics (Prometheus), tracing (Jaeger with X-Request-ID), logging (Kafka → ClickHouse)"
-8. "Gateway is **stateless** — every instance is identical, horizontally scalable"
+1. "An API Gateway is the **single entry point** for all external traffic — it does auth, rate limiting, routing, and observability."
+2. "Core entities: **Route** (path→service mapping), **BackendService** (instances + health), **RequestLog** (observability)."
+3. "Every request goes through a **pipeline**: SSL term → Auth → Rate limit → Route → Load balance → Log."
+4. "Auth: **JWT validated at gateway** (stateless, no DB call). Public keys cached from JWKS endpoint."
+5. "Rate limiting: **Redis** shared across all gateway instances for global accuracy."
+6. "Routing: **in-memory prefix trie** updated every 30s from Config DB — never query DB on critical path."
+7. "Circuit breaker prevents **cascading failures**: if a backend is sick, reject requests fast instead of letting them pile up."
+8. "Gateway is **stateless** — every instance is identical, horizontally scalable."
 
 ---
 

@@ -5,7 +5,9 @@
 
 ---
 
-## SECTION 1 — Clarifying Questions (Ask These FIRST in Interview)
+## Step 1 — Requirements (~5 min)
+
+### 1.1 Clarifying Questions (Ask These FIRST)
 
 **Functional Scope:**
 - What types of notifications? Push (mobile), Email, SMS, In-app?
@@ -27,11 +29,7 @@
 - Priority: high (OTP, alerts) vs low (promotions)
 - At-least-once delivery
 
----
-
-## SECTION 2 — Functional & Non-Functional Requirements
-
-### Functional Requirements
+### 1.2 Functional Requirements (FR)
 1. Send push notifications (iOS APNs, Android FCM)
 2. Send email notifications (via SendGrid / SES)
 3. Send SMS notifications (via Twilio)
@@ -40,44 +38,118 @@
 6. Scheduled notifications (send at a future time)
 7. Notification templates with dynamic variables (`Hello {name}, your order {order_id} is ready`)
 
-### Non-Functional Requirements
+### 1.3 Non-Functional Requirements (NFR)
 | Property | Target |
 |---|---|
 | **Throughput** | Handle 1 billion notifications/day = ~11,500/sec |
 | **Latency** | High-priority (OTP, alerts): < 5 sec; Low-priority: best effort |
 | **Reliability** | At-least-once delivery for high-priority notifications |
 | **Scalability** | Horizontally scalable across all channels |
-| **Deduplification** | Don't send duplicate notifications if retry triggers |
+| **Deduplication** | Don't send duplicate notifications if retry triggers |
 
-### Out of Scope
+### 1.4 Out of Scope
 - WhatsApp / Telegram bot notifications
 - Analytics and open-rate tracking (mention as extension)
 - A/B testing notification content
 
 ---
 
-## SECTION 3 — Capacity Estimation
+## Step 2 — Core Entities (~3 min)
 
-### Volume
-- 1 billion notifications/day
-- = 1B / 86,400 ≈ **~11,500 notifications/sec** average
-- Peak (morning rush, flash sales): ~50,000/sec
+### 2.1 Entity Identification
 
-### Breakdown by channel (approximate)
-- Push notifications: 70% = 700M/day
-- Email: 20% = 200M/day
-- SMS: 5% = 50M/day (expensive! $0.01/SMS = $500K/day at full volume)
-- In-app: 5% = 50M/day
+```
+┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐
+│ NotificationJob  │     │ NotifDelivery    │     │  UserDevice      │
+│                  │     │ (per-recipient)  │     │                  │
+│ job_id           │────►│ delivery_id      │     │ user_id          │
+│ type (push/email │     │ job_id           │     │ device_id        │
+│   /sms/inapp)    │     │ user_id          │     │ platform         │
+│ priority         │     │ channel          │     │ push_token       │
+│ template_id      │     │ status           │     │ is_active        │
+│ template_vars    │     │ idempotency_key  │     └──────────────────┘
+│ scheduled_at     │     └──────────────────┘
+│ status           │                              ┌──────────────────┐
+└──────────────────┘                              │ UserPreference   │
+                                                  │                  │
+                                                  │ user_id          │
+                                                  │ push_enabled     │
+                                                  │ email_enabled    │
+                                                  │ quiet_hours      │
+                                                  └──────────────────┘
+```
 
-### Storage (notification logs)
-- Keep logs for 30 days for debugging and idempotency
-- 1B records/day × 30 days × 200 bytes = **~6 TB** of notification logs
+**Primary entities**: `NotificationJob` (the send request), `NotificationDelivery` (per-recipient delivery tracking), `UserDevice` (push tokens), `UserPreference` (opt-in/out settings).
+
+### 2.2 Data Model / Schema
+
+**Table 1: `notification_jobs`**
+```
+job_id           BIGINT       PRIMARY KEY (Snowflake)
+type             ENUM('push', 'email', 'sms', 'inapp')
+priority         ENUM('high', 'low')
+template_id      VARCHAR(100)
+template_vars    JSONB
+status           ENUM('queued', 'processing', 'delivered', 'failed')
+scheduled_at     TIMESTAMP
+created_at       TIMESTAMP
+retry_count      INT          DEFAULT 0
+```
+**DB Choice**: PostgreSQL (good for job tracking, scheduling queries)
+
+**Table 2: `notification_deliveries` (per-recipient delivery record)**
+```
+delivery_id      BIGINT       PRIMARY KEY
+job_id           BIGINT
+user_id          BIGINT
+channel          ENUM('push', 'email', 'sms', 'inapp')
+status           ENUM('pending', 'delivered', 'failed', 'unsubscribed')
+delivered_at     TIMESTAMP
+failure_reason   TEXT         NULL
+idempotency_key  VARCHAR(64)  UNIQUE   -- prevents duplicates on retry
+```
+**DB Choice**: Cassandra (high write volume, partition by `user_id` for per-user queries)
+
+**Table 3: `user_devices` (for push notifications)**
+```
+user_id          BIGINT
+device_id        VARCHAR(200)
+platform         ENUM('ios', 'android', 'web')
+push_token       TEXT         -- APNs token or FCM registration token
+is_active        BOOLEAN
+last_seen        TIMESTAMP
+PRIMARY KEY (user_id, device_id)
+```
+
+**Table 4: `user_preferences`**
+```
+user_id              BIGINT   PRIMARY KEY
+push_enabled         BOOLEAN  DEFAULT true
+email_enabled        BOOLEAN  DEFAULT true
+sms_enabled          BOOLEAN  DEFAULT true
+marketing_enabled    BOOLEAN  DEFAULT true
+quiet_hours_start    TIME     NULL  (e.g., 22:00 — don't disturb after 10pm)
+quiet_hours_end      TIME     NULL
+```
+
+**Table 5: `inapp_notifications`**
+```
+notification_id  BIGINT       PRIMARY KEY
+user_id          BIGINT
+text             TEXT
+action_url       TEXT
+is_read          BOOLEAN      DEFAULT false
+created_at       TIMESTAMP
+```
+**DB Choice**: Cassandra (partition by `user_id`, cluster by `created_at DESC`)
+
+> 🎯 **NFR addressed**: **Deduplication** — `idempotency_key` UNIQUE constraint on deliveries prevents double-sends. **Reliability** — Cassandra durability for delivery records. **Scalability** — Cassandra for high-volume delivery writes.
 
 ---
 
-## SECTION 4 — API Design
+## Step 3 — API or Interface (~5 min)
 
-### 1. Send Notification (Internal API — called by other services)
+### 3.1 Send Notification (Internal API — called by other services)
 ```
 POST /api/v1/notifications/send
 Authorization: Internal-Service-Key
@@ -101,13 +173,13 @@ Response 202 Accepted:
 }
 ```
 
-### 2. Get Notification Status
+### 3.2 Get Notification Status
 ```
 GET /api/v1/notifications/{notification_job_id}/status
 Response: { "status": "delivered" | "failed" | "pending", "delivered_at": "..." }
 ```
 
-### 3. User Preference Update
+### 3.3 User Preference Update
 ```
 PUT /api/v1/users/{user_id}/notification-preferences
 {
@@ -118,7 +190,7 @@ PUT /api/v1/users/{user_id}/notification-preferences
 }
 ```
 
-### 4. Fetch In-App Notifications (User-facing)
+### 3.4 Fetch In-App Notifications (User-facing)
 ```
 GET /api/v1/users/{user_id}/notifications?limit=20&cursor=...
 Response: {
@@ -129,73 +201,63 @@ Response: {
 }
 ```
 
----
-
-## SECTION 5 — Data Model & Database Choice
-
-### Table 1: `notification_jobs`
-```
-job_id           BIGINT       PRIMARY KEY (Snowflake)
-type             ENUM('push', 'email', 'sms', 'inapp')
-priority         ENUM('high', 'low')
-template_id      VARCHAR(100)
-template_vars    JSONB
-status           ENUM('queued', 'processing', 'delivered', 'failed')
-scheduled_at     TIMESTAMP
-created_at       TIMESTAMP
-retry_count      INT          DEFAULT 0
-```
-**DB Choice**: PostgreSQL (good for job tracking, scheduling queries)
-
-### Table 2: `notification_deliveries` (per-recipient delivery record)
-```
-delivery_id      BIGINT       PRIMARY KEY
-job_id           BIGINT
-user_id          BIGINT
-channel          ENUM('push', 'email', 'sms', 'inapp')
-status           ENUM('pending', 'delivered', 'failed', 'unsubscribed')
-delivered_at     TIMESTAMP
-failure_reason   TEXT         NULL
-idempotency_key  VARCHAR(64)  UNIQUE   -- prevents duplicates on retry
-```
-**DB Choice**: Cassandra (high write volume, partition by `user_id` for per-user queries)
-
-### Table 3: `user_devices` (for push notifications)
-```
-user_id          BIGINT
-device_id        VARCHAR(200)
-platform         ENUM('ios', 'android', 'web')
-push_token       TEXT         -- APNs token or FCM registration token
-is_active        BOOLEAN
-last_seen        TIMESTAMP
-PRIMARY KEY (user_id, device_id)
-```
-
-### Table 4: `user_preferences`
-```
-user_id              BIGINT   PRIMARY KEY
-push_enabled         BOOLEAN  DEFAULT true
-email_enabled        BOOLEAN  DEFAULT true
-sms_enabled          BOOLEAN  DEFAULT true
-marketing_enabled    BOOLEAN  DEFAULT true
-quiet_hours_start    TIME     NULL  (e.g., 22:00 — don't disturb after 10pm)
-quiet_hours_end      TIME     NULL
-```
-
-### Table 5: `inapp_notifications`
-```
-notification_id  BIGINT       PRIMARY KEY
-user_id          BIGINT
-text             TEXT
-action_url       TEXT
-is_read          BOOLEAN      DEFAULT false
-created_at       TIMESTAMP
-```
-**DB Choice**: Cassandra (partition by `user_id`, cluster by `created_at DESC`)
+> 🎯 **NFR addressed**: **Throughput** — 202 Accepted (async) pattern prevents blocking under high load. **Latency** — high-priority notifications bypass scheduling, sent immediately.
 
 ---
 
-## SECTION 6 — High-Level Architecture
+## Step 4 — Data Flow (~3 min)
+
+### 4.1 Capacity Estimation (Back-of-Envelope)
+
+**Volume:**
+- 1 billion notifications/day
+- = 1B / 86,400 ≈ **~11,500 notifications/sec** average
+- Peak (morning rush, flash sales): ~50,000/sec
+
+**Breakdown by channel (approximate):**
+- Push notifications: 70% = 700M/day
+- Email: 20% = 200M/day
+- SMS: 5% = 50M/day (expensive! $0.01/SMS = $500K/day at full volume)
+- In-app: 5% = 50M/day
+
+**Storage (notification logs):**
+- Keep logs for 30 days for debugging and idempotency
+- 1B records/day × 30 days × 200 bytes = **~6 TB** of notification logs
+
+### 4.2 Data Flow Through System
+
+**Immediate Notification Flow:**
+```
+Producer Service (Order/Payment/Auth)
+  → POST /notifications/send
+  → Notification API Service:
+    1. Validate request
+    2. Check user preferences (opted out? quiet hours?)
+    3. Render template with variables
+    4. Enqueue to Kafka (topic by channel: push/email/sms/inapp)
+  → Channel Worker consumes from Kafka:
+    - Push Worker → APNs (iOS) / FCM (Android)
+    - Email Worker → SendGrid / Amazon SES
+    - SMS Worker → Twilio
+    - In-app Worker → Write to Cassandra
+  → Update delivery status
+```
+
+**Scheduled Notification Flow:**
+```
+Notification API stores job with scheduled_at in DB
+  → Scheduler Service polls DB every minute: WHERE scheduled_at <= now()
+  → Enqueues due notifications into Kafka
+  → Same channel worker pipeline as above
+```
+
+> 🎯 **NFR addressed**: **Throughput** — Kafka decouples producers from channel workers; scales consumers independently. **Reliability** — Kafka retains messages if workers are down; at-least-once delivery.
+
+---
+
+## Step 5 — High-level Design (~10 min)
+
+### 5.1 Architecture Diagram
 
 ```
      PRODUCER SERVICES (any internal service that wants to notify users)
@@ -255,9 +317,21 @@ created_at       TIMESTAMP
 └──────────────────────────────────────────────────────┘
 ```
 
+### 5.2 Component Walkthrough
+
+| Component | Role | Why This Choice |
+|---|---|---|
+| **Notification API Service** | Validates, renders templates, checks preferences, enqueues | Single entry point; all filtering done before queue to avoid wasted work |
+| **Kafka** | Channel-specific topic queues | Durable, replayable; separate topics for priority isolation |
+| **Push/Email/SMS Workers** | Channel-specific delivery via third-party APIs | Independently scalable per channel; isolated failure domains |
+| **Scheduler Service** | Polls for due scheduled notifications | Simple polling approach; minute-level granularity is sufficient |
+| **User Preference Filter** | Checks opt-outs, quiet hours before enqueuing | Prevents sending to opted-out users (legal compliance + user experience) |
+
+> 🎯 **NFR addressed**: **Throughput 11.5K/sec** — Kafka + consumer group scaling. **Latency < 5s for OTP** — separate high-priority topic with large consumer group. **Deduplication** — idempotency_key checked before delivery. **Scalability** — each channel worker pool scales independently.
+
 ---
 
-## SECTION 7 — Deep Dives
+## Step 6 — Deep Dives (~15 min)
 
 ### Deep Dive 1: Push Notifications — APNs vs FCM
 
@@ -363,15 +437,15 @@ Rendered: "Hello Alice, your order 123 shipped! Track at https://..."
 
 ---
 
-## SECTION 8 — Trade-offs & Alternatives
+### Trade-offs & Alternatives
 
-### CAP Theorem Position
+**CAP Theorem Position:**
 **AP with at-least-once delivery**:
 - It's acceptable to deliver a notification twice (idempotency key prevents true duplicates)
 - It's NOT acceptable to fail to deliver an OTP
 - Kafka provides durability — messages survive worker crashes
 
-### Key Trade-offs Table
+**Key Trade-offs Table:**
 
 | Decision | Choice | Alternative | Reasoning |
 |---|---|---|---|
@@ -381,7 +455,7 @@ Rendered: "Hello Alice, your order 123 shipped! Track at https://..."
 | Email provider | SendGrid/SES | Self-hosted SMTP | Deliverability of self-hosted SMTP is very hard to maintain (spam filters) |
 | Retry mechanism | Exponential backoff | Fixed interval | Exponential backoff reduces load on failing external services |
 
-### What Would You Do Differently at Larger Scale?
+**What Would You Do Differently at Larger Scale?**
 - **Delivery tracking**: webhook from APNs/FCM confirming device actually received notification (vs. just accepted by APNs)
 - **A/B testing**: send variant A to 50% of users, variant B to other 50%, track click rates
 - **Notification center**: history of all past notifications per user (already covered by `inapp_notifications` table)
@@ -389,15 +463,16 @@ Rendered: "Hello Alice, your order 123 shipped! Track at https://..."
 
 ---
 
-## Interview Flow Summary (Talk Track)
+### Summary Talk Track
 
-1. "A notification system is fundamentally an **async fan-out pipeline** from event source to delivery channel"
-2. "Architecture: Notification API → Kafka (by channel) → Channel Workers → APNs/FCM/SendGrid/Twilio"
-3. "The 3 key challenges: **priority separation** (OTP vs marketing), **retry with backoff**, and **rate limiting per user**"
-4. "For push: device tokens stored per user, pushed to APNs (iOS) or FCM (Android)"
-5. "For mass sends: segment expansion in fan-out worker, not at API time"
-6. "Idempotency key prevents duplicate delivery on retry"
-7. "Quiet hours and user preferences are checked BEFORE enqueuing — avoids wasted work"
+1. "A notification system is fundamentally an **async fan-out pipeline** from event source to delivery channel."
+2. "Core entities: **NotificationJob** (request), **Delivery** (per-recipient tracking), **UserDevice** (push tokens), **UserPreference** (opt-outs)."
+3. "Architecture: Notification API → Kafka (by channel) → Channel Workers → APNs/FCM/SendGrid/Twilio."
+4. "The 3 key challenges: **priority separation** (OTP vs marketing), **retry with backoff**, and **rate limiting per user**."
+5. "For push: device tokens stored per user, pushed to APNs (iOS) or FCM (Android)."
+6. "For mass sends: segment expansion in fan-out worker, not at API time."
+7. "Idempotency key prevents duplicate delivery on retry."
+8. "Quiet hours and user preferences are checked BEFORE enqueuing — avoids wasted work."
 
 ---
 

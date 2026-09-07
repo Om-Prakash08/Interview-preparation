@@ -5,7 +5,9 @@
 
 ---
 
-## SECTION 1 — Clarifying Questions (Ask These FIRST in Interview)
+## Step 1 — Requirements (~5 min)
+
+### 1.1 Clarifying Questions (Ask These FIRST)
 
 **Functional Scope:**
 - Book movie tickets, concert tickets, or sports events — all?
@@ -28,11 +30,7 @@
 - 5 million bookings per day, peak during popular event launch: 100,000 concurrent users
 - Up to 50,000 seats per event
 
----
-
-## SECTION 2 — Functional & Non-Functional Requirements
-
-### Functional Requirements
+### 1.2 Functional Requirements (FR)
 1. Browse events (movies, concerts) by city, date, category
 2. View available seats for an event + showtime
 3. Select and temporarily hold seats (10-minute lock)
@@ -40,7 +38,7 @@
 5. Receive booking confirmation
 6. Cancel booking (within policy window)
 
-### Non-Functional Requirements
+### 1.3 Non-Functional Requirements (NFR)
 | Property | Target |
 |---|---|
 | **Concurrency** | Handle thousands of users trying to book same seats simultaneously |
@@ -49,127 +47,44 @@
 | **Latency** | Seat selection < 500ms; payment < 3s |
 | **Scale** | 5 million bookings/day; 100K concurrent users at peak launch |
 
-### Out of Scope
+### 1.4 Out of Scope
 - Recommendation engine
 - Food ordering at cinema
 - Seat pricing/surge (mention as extension)
 
 ---
 
-## SECTION 3 — Capacity Estimation
+## Step 2 — Core Entities (~3 min)
 
-### Bookings
-- 5 million bookings/day
-- Average 2 seats per booking = 10 million seat transactions/day
-- = 10M / 86,400 ≈ **~115 bookings/sec** normal
-- Peak (concert drops at 10am): **50,000+ concurrent users** in first minute
+### 2.1 Entity Identification
 
-### Read vs Write
-- Browsing (highly cacheable): 1000:1 vs booking
-- Seat availability checks: 100:1 vs actual booking
-- **Most load is reads** — but the writes (booking) must be ACID
-
-### Storage
-- Events: 1 million events × 1 KB = 1 GB
-- Seats: 1 million events × avg 500 seats × 100 bytes = **50 GB**
-- Bookings: 5M/day × 365 × 500 bytes = **~900 GB/year**
-- Total: small enough for PostgreSQL to handle
-
----
-
-## SECTION 4 — API Design
-
-### 1. Search Events
 ```
-GET /api/v1/events?city=Mumbai&date=2025-08-01&category=movie
-Response: { "events": [ { "event_id", "name", "venue", "showtimes": [...] } ] }
+┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
+│   Event      │   │  Showtime    │   │    Seat      │   │   Booking    │
+│              │   │              │   │  (critical)  │   │              │
+│ event_id     │──►│ showtime_id  │──►│ seat_id      │   │ booking_id   │
+│ name         │   │ event_id     │   │ showtime_id  │◄──│ showtime_id  │
+│ venue_id     │   │ start_time   │   │ category     │   │ seat_ids[]   │
+│ city         │   │ total_seats  │   │ price        │   │ user_id      │
+│ category     │   │ avail_seats  │   │ status       │   │ total_price  │
+└──────────────┘   └──────────────┘   │ hold_expires │   │ payment_ref  │
+                                      └──────────────┘   └──────────────┘
+                                      ┌──────────────┐
+                                      │    Hold      │
+                                      │              │
+                                      │ hold_id      │
+                                      │ user_id      │
+                                      │ seat_ids[]   │
+                                      │ expires_at   │
+                                      │ status       │
+                                      └──────────────┘
 ```
 
-### 2. Get Seat Map
-```
-GET /api/v1/events/{event_id}/showtimes/{showtime_id}/seats
-Response: {
-  "showtime_id": "st_123",
-  "seats": [
-    { "seat_id": "A1", "row": "A", "number": 1, "category": "premium", "price": 500, "status": "available" },
-    { "seat_id": "A2", "row": "A", "number": 2, "category": "premium", "price": 500, "status": "held" },
-    ...
-  ]
-}
-```
+**Primary entities**: `Event` (what), `Showtime` (when), `Seat` (the critical resource — must never be double-booked), `Hold` (temporary lock), `Booking` (confirmed purchase).
 
-### 3. Hold Seats (Temporary Lock)
-```
-POST /api/v1/bookings/hold
-Authorization: Bearer <token>
-{
-  "showtime_id": "st_123",
-  "seat_ids": ["A1", "A3"]
-}
+### 2.2 Data Model / Schema
 
-Response 200:
-{
-  "hold_id": "hold_abc",
-  "seats": ["A1", "A3"],
-  "expires_at": "2025-08-01T11:10:00Z",   // 10 minutes
-  "total_price": 1000
-}
-
-Response 409 Conflict:
-{
-  "error": "SEAT_UNAVAILABLE",
-  "unavailable_seats": ["A1"]
-}
-```
-
-### 4. Confirm Booking (Payment)
-```
-POST /api/v1/bookings/confirm
-{
-  "hold_id": "hold_abc",
-  "payment_token": "stripe_tok_xyz"
-}
-
-Response 200:
-{
-  "booking_id": "BKG-12345",
-  "status": "confirmed",
-  "seats": ["A1", "A3"],
-  "total_paid": 1000,
-  "confirmation_code": "XYZ789"
-}
-```
-
-### 5. Cancel Booking
-```
-DELETE /api/v1/bookings/{booking_id}
-Response: { "refund_amount": 900, "status": "cancelled" }
-```
-
----
-
-## SECTION 5 — Data Model & Database Choice
-
-### Table 1: `events`
-```
-event_id      BIGINT       PRIMARY KEY
-name          VARCHAR(200)
-venue_id      BIGINT
-city          VARCHAR(100)
-category      ENUM('movie', 'concert', 'sports')
-description   TEXT
-```
-
-### Table 2: `showtimes`
-```
-showtime_id   BIGINT       PRIMARY KEY
-event_id      BIGINT
-start_time    TIMESTAMP
-total_seats   INT
-available_seats INT
-```
-
-### Table 3: `seats` (The critical table)
+**Table 1: `seats` (The critical table)**
 ```
 seat_id       VARCHAR(20)  -- e.g., "A1"
 showtime_id   BIGINT
@@ -182,10 +97,9 @@ hold_id       BIGINT       NULL
 hold_expires  TIMESTAMP    NULL
 PRIMARY KEY (showtime_id, seat_id)
 ```
-**DB Choice**: **PostgreSQL** — we need ACID transactions for seat booking.
-Row-level locking is critical to prevent double-booking.
+**DB Choice**: **PostgreSQL** — we need ACID transactions for seat booking. Row-level locking is critical to prevent double-booking.
 
-### Table 4: `holds`
+**Table 2: `holds`**
 ```
 hold_id       BIGINT       PRIMARY KEY
 user_id       BIGINT
@@ -196,7 +110,7 @@ status        ENUM('active', 'expired', 'converted')
 created_at    TIMESTAMP
 ```
 
-### Table 5: `bookings`
+**Table 3: `bookings`**
 ```
 booking_id    BIGINT       PRIMARY KEY
 user_id       BIGINT
@@ -209,9 +123,117 @@ status        ENUM('confirmed', 'cancelled')
 booked_at     TIMESTAMP
 ```
 
+**Table 4: `events` + `showtimes`** (standard metadata tables as shown in entity diagram)
+
+> 🎯 **NFR addressed**: **Consistency** — PostgreSQL ACID + row-level locking prevents double-booking. **Concurrency** — `SELECT FOR UPDATE` serializes concurrent access to same seat. **Latency** — seat status cached in Redis for fast reads.
+
 ---
 
-## SECTION 6 — High-Level Architecture
+## Step 3 — API or Interface (~5 min)
+
+### 3.1 Search Events
+```
+GET /api/v1/events?city=Mumbai&date=2025-08-01&category=movie
+Response: { "events": [ { "event_id", "name", "venue", "showtimes": [...] } ] }
+```
+
+### 3.2 Get Seat Map
+```
+GET /api/v1/events/{event_id}/showtimes/{showtime_id}/seats
+Response: {
+  "seats": [
+    { "seat_id": "A1", "category": "premium", "price": 500, "status": "available" },
+    { "seat_id": "A2", "category": "premium", "price": 500, "status": "held" },
+    ...
+  ]
+}
+```
+
+### 3.3 Hold Seats (Temporary Lock)
+```
+POST /api/v1/bookings/hold
+Authorization: Bearer <token>
+{
+  "showtime_id": "st_123",
+  "seat_ids": ["A1", "A3"]
+}
+
+Response 200: { "hold_id": "hold_abc", "expires_at": "...", "total_price": 1000 }
+Response 409 Conflict: { "error": "SEAT_UNAVAILABLE", "unavailable_seats": ["A1"] }
+```
+
+### 3.4 Confirm Booking (Payment)
+```
+POST /api/v1/bookings/confirm
+{
+  "hold_id": "hold_abc",
+  "payment_token": "stripe_tok_xyz"
+}
+
+Response 200: { "booking_id": "BKG-12345", "status": "confirmed", "confirmation_code": "XYZ789" }
+```
+
+### 3.5 Cancel Booking
+```
+DELETE /api/v1/bookings/{booking_id}
+Response: { "refund_amount": 900, "status": "cancelled" }
+```
+
+> 🎯 **NFR addressed**: **Consistency** — Hold API returns 409 Conflict immediately if seat is taken. **Latency** — Hold + Confirm separation allows 10-min payment window without blocking other users.
+
+---
+
+## Step 4 — Data Flow (~3 min)
+
+### 4.1 Capacity Estimation (Back-of-Envelope)
+
+**Bookings:**
+- 5 million bookings/day, average 2 seats = 10 million seat transactions/day
+- = 10M / 86,400 ≈ **~115 bookings/sec** normal
+- Peak (concert drops at 10am): **50,000+ concurrent users** in first minute
+
+**Read vs Write:**
+- Browsing (highly cacheable): 1000:1 vs booking
+- Seat availability checks: 100:1 vs actual booking
+- **Most load is reads** — but the writes (booking) must be ACID
+
+**Storage:**
+- Events + Seats + Bookings: **< 1 TB total** — PostgreSQL handles this fine
+
+### 4.2 Data Flow Through System
+
+**Seat Booking Flow:**
+```
+User browses events → Event Service (cached in Redis/CDN)
+  → User selects showtime → Seat Service (Redis cached seat map)
+  → User picks seats A1, A3 → POST /hold
+    → Booking Service → PostgreSQL:
+      BEGIN TRANSACTION;
+      SELECT ... FOR UPDATE (lock seat rows)
+      IF available → UPDATE status='held', set hold_expires
+      COMMIT;
+    → Return hold_id + 10-min timer
+  → User enters payment → POST /confirm
+    → Booking Service → Payment Service (Stripe)
+    → Success → UPDATE seats status='booked', CREATE booking record
+    → Send confirmation notification
+```
+
+**Hold Expiry Flow:**
+```
+Background Worker (every 30 seconds):
+  → Scan for holds WHERE hold_expires < NOW() AND status='active'
+  → Release seats: UPDATE status='available'
+  → Mark holds as 'expired'
+```
+
+> 🎯 **NFR addressed**: **Consistency** — transaction + row lock guarantees no double-booking. **Concurrency** — locked seats are immediately visible as 'held' to other users. **Scale** — reads are 1000:1 cached; only the critical write path hits Postgres.
+
+---
+
+## Step 5 — High-level Design (~10 min)
+
+### 5.1 Architecture Diagram
 
 ```
                USERS (browsing + booking)
@@ -232,8 +254,6 @@ booked_at     TIMESTAMP
         │          ┌────▼──────────────────┐   │
         │          │  Redis Cache          │   │
         │          │  seat_status per show │   │
-        │          │  (fast availability   │   │
-        │          │   reads)              │   │
         │          └───────────────────────┘   │
         │                                      │
         └──────────────────┬───────────────────┘
@@ -242,50 +262,41 @@ booked_at     TIMESTAMP
               │    PostgreSQL (Primary DB)  │
               │    ACID transactions        │
               │    Row-level locking        │
-              │    seats, bookings, holds   │
               └────────────┬────────────────┘
                            │
               ┌────────────▼────────────────┐
               │  Read Replicas (Postgres)   │
-              │  For browse queries         │
               └─────────────────────────────┘
 
               ┌────────────────────────────────────────┐
-              │        Payment Service                 │
-              │  (Stripe/Razorpay integration)         │
-              │  Called AFTER hold is confirmed        │
-              └────────────────────────────────────────┘
-
-              ┌────────────────────────────────────────┐
-              │      Hold Expiry Worker                │
-              │  Scans holds expiring in next 60sec    │
-              │  Releases expired seats back to pool   │
-              └────────────────────────────────────────┘
-
-              ┌────────────────────────────────────────┐
-              │    Notification Service                │
-              │  Sends booking confirmation email/SMS  │
+              │  Payment Service + Hold Expiry Worker  │
+              │  + Notification Service                │
               └────────────────────────────────────────┘
 ```
 
+### 5.2 Component Walkthrough
+
+| Component | Role | Why This Choice |
+|---|---|---|
+| **Event Service** | Browse/search events (cacheable) | Read-heavy; CDN + Redis cache for < 100ms browsing |
+| **Seat Service** | Returns seat map with real-time availability | Redis cache with 10s TTL; invalidated on seat status change |
+| **Booking Service** | Hold → Confirm → Cancel flow | Orchestrates the critical path with PostgreSQL transactions |
+| **PostgreSQL** | ACID storage for seats, holds, bookings | Row-level locking via `SELECT FOR UPDATE` — the core concurrency control |
+| **Redis** | Seat map cache + hold status | Fast reads for browsing; reduces DB load by 100× |
+| **Hold Expiry Worker** | Background job releasing expired holds | Simple polling; releases seats back to pool after 10-min timeout |
+| **Payment Service** | Stripe/Razorpay integration | Called after hold; idempotency key = hold_id prevents double charges |
+
+> 🎯 **NFR addressed**: **Consistency** — PostgreSQL ACID for booking; no double-booking possible. **Availability 99.99%** — browsing reads from cache/replicas even during booking spikes. **Latency** — seat selection < 500ms (Redis cache hit). **Scale** — 100K concurrent users handled by waiting room + cached reads.
+
 ---
 
-## SECTION 7 — Deep Dives
+## Step 6 — Deep Dives (~15 min)
 
 ### Deep Dive 1: Preventing Double Booking (The Core Problem)
 
 This is the MOST critical part of this interview question.
 
 **Scenario**: 1000 users all try to book seat A1 simultaneously.
-
-**Naive approach (wrong):**
-```
-1. Check if seat A1 is available  ← race condition!
-2. Mark as held
-3. Charge user
-
-Problem: Two requests pass step 1 simultaneously → both book the same seat!
-```
 
 **Solution: Database Row-Level Lock (Pessimistic Locking)**
 ```sql
@@ -309,11 +320,6 @@ ELSE:
     RETURN SEAT_UNAVAILABLE
 ```
 
-**Result**: 
-- All concurrent requests are serialized at the DB level
-- Only ONE transaction succeeds at a time per seat
-- Guaranteed no double-booking
-
 **For multiple seats** (user wants A1 AND A2):
 ```sql
 SELECT * FROM seats
@@ -324,33 +330,9 @@ FOR UPDATE;
 
 ---
 
-### Deep Dive 2: Seat Hold Expiry
+### Deep Dive 2: High-Demand Event Launch (Waiting Room)
 
-- User selects seats → 10-minute hold
-- User abandons (doesn't complete payment) → seats must be released
-
-**Background Worker (runs every 30 seconds):**
-```sql
-UPDATE seats
-SET status = 'available', hold_id = NULL, hold_expires = NULL
-WHERE status = 'held'
-AND hold_expires < NOW();
-
-UPDATE holds SET status = 'expired'
-WHERE status = 'active' AND expires_at < NOW();
-```
-
-**Alternative: Optimistic approach in Redis**
-- Hold state stored in Redis with TTL
-- Redis automatically expires the key after 10 minutes
-- Seat status synced from Redis to Postgres only on booking confirmation
-- But: Redis failure loses hold state → users re-select seats (annoying but safe)
-
----
-
-### Deep Dive 3: High-Demand Event Launch (Waiting Room)
-
-**Problem**: Taylor Swift concert goes on sale at 10am. 500,000 users hit the site simultaneously. Even holding would be chaotic — everyone fights for seats at once.
+**Problem**: Taylor Swift concert goes on sale at 10am. 500,000 users hit the site simultaneously.
 
 **Solution: Virtual Waiting Room / Queue**
 ```
@@ -361,106 +343,75 @@ WHERE status = 'active' AND expires_at < NOW();
 
 Entry rate: 
   → System processes 1000 users/minute from queue
-  → User at position 1000 enters the booking flow at 10:01
-  → User at position 10000 enters at 10:10
   → Users see estimated wait time on waiting room page
 
-Benefits:
-  - Booking system gets smooth, controlled load (not a spike)
-  - First-come-first-served (fair)
-  - Users don't need to frantically refresh
-```
-
-**Implementation:**
-```
-On entering waiting room:
+Implementation:
   → ZADD waiting_room:event_123 {timestamp} {user_id}
-
-Every second, admission worker:
-  → ZPOPMIN waiting_room:event_123 COUNT 20   // admit next 20 users
-  → Issue each user a time-limited booking token (JWT, valid 15 min)
+  → Every second: ZPOPMIN waiting_room:event_123 COUNT 20 (admit 20 users)
+  → Each admitted user gets a time-limited booking token (JWT, valid 15 min)
   → Only users with valid booking token can call hold/book APIs
 ```
 
 ---
 
-### Deep Dive 4: Seat Map Performance
+### Deep Dive 3: Seat Hold Expiry
 
-- 50,000 seats per event × availability status
-- At 100,000 concurrent users browsing: 100,000 × seat map fetch/sec
+- User selects seats → 10-minute hold
+- User abandons (doesn't complete payment) → seats must be released
 
-**Strategy:**
-1. **Cache full seat map in Redis** per showtime: `seat_map:{showtime_id}` → JSON of all seats + statuses
-2. **TTL: 10 seconds** (short enough for freshness, long enough to absorb load)
-3. On seat status change (hold, book, release): **invalidate Redis cache** for that showtime
-4. 99% of requests → Redis; only cache misses hit Postgres
+**Background Worker (runs every 30 seconds):**
+```sql
+UPDATE seats SET status = 'available', hold_id = NULL, hold_expires = NULL
+WHERE status = 'held' AND hold_expires < NOW();
 
-**Alternative: WebSocket push**
-- When a seat is held/booked, push update to all browsers viewing that seat map
-- Seat icons update in real-time without polling
-- Implementation: Server-Sent Events from a Seat Update Service (subscribes to Kafka events)
+UPDATE holds SET status = 'expired'
+WHERE status = 'active' AND expires_at < NOW();
+```
 
 ---
 
-### Deep Dive 5: Payment Failure Handling
+### Deep Dive 4: Payment Failure Handling
 
-**Flow:**
 ```
 1. User holds seats (10 min window)
 2. User submits payment → Booking Service calls Payment Service (Stripe)
-3a. Payment SUCCESS:
-    - UPDATE seats SET status='booked'
-    - CREATE booking record
-    - DELETE hold record
-    - Publish event → Notification Service (email/SMS confirmation)
+3a. Payment SUCCESS → UPDATE seats status='booked', CREATE booking
+3b. Payment FAILURE → Don't release hold; user can retry within 10 min
+    → If 10 min expires: hold cleanup worker releases seats
 
-3b. Payment FAILURE:
-    - Don't release hold immediately (user can retry within 10 min)
-    - Return payment error to user
-    - User can retry with different card
-    - If 10 min expires: hold cleanup worker releases seats automatically
+Idempotency: payment_idempotency_key = hold_id
+→ Same hold_id retried → Stripe returns same result, no double charge
 ```
-
-**Idempotency** (critical for payments):
-- Payment request includes `idempotency_key = hold_id`
-- If payment API is called twice (retry after timeout): Stripe detects same key → returns same result, doesn't charge twice
 
 ---
 
-## SECTION 8 — Trade-offs & Alternatives
+### Trade-offs & Alternatives
 
-### CAP Theorem Position
+**CAP Theorem Position:**
 **CP (Consistency + Partition Tolerance)**
 - A seat must NEVER be double-booked — consistency is non-negotiable
 - Better to return "seat unavailable" than to book the same seat twice
-- PostgreSQL is CP by design — perfect for this use case
 
-### Key Trade-offs Table
+**Key Trade-offs Table:**
 
 | Decision | Choice | Alternative | Reasoning |
 |---|---|---|---|
-| Locking | Pessimistic (SELECT FOR UPDATE) | Optimistic (version check) | Pessimistic is simpler and correct for high-contention seat booking; optimistic causes many retries |
-| Database | PostgreSQL (ACID) | Cassandra | Cassandra doesn't support row-level locking; ACID is essential for seat booking |
-| Seat cache | Redis (10s TTL) | Always read from DB | DB can't handle 100K seat map fetches/sec; Redis absorbs the read load |
-| Peak load | Virtual waiting room | No queue (direct access) | Without waiting room, 500K concurrent users overwhelm even the largest cluster |
-| Hold expiry | Background worker | Redis key TTL + sync | Redis TTL is simpler but depends on Redis-Postgres sync; background worker is more reliable |
-
-### What Would You Do Differently at Larger Scale?
-- **Dynamic pricing**: surge pricing (higher demand → higher price)
-- **Anti-touting**: detect and block bots buying bulk tickets for resale
-- **Partial booking**: if user wants 4 seats and only 3 remain, offer alternative shows
-- **Waitlisting**: if event is sold out, user can join waitlist (gets notified on cancellation)
+| Locking | Pessimistic (SELECT FOR UPDATE) | Optimistic (version check) | Pessimistic is simpler and correct for high-contention seat booking |
+| Database | PostgreSQL (ACID) | Cassandra | Cassandra doesn't support row-level locking; ACID is essential |
+| Seat cache | Redis (10s TTL) | Always read from DB | DB can't handle 100K seat map fetches/sec |
+| Peak load | Virtual waiting room | No queue (direct access) | Without waiting room, 500K concurrent users overwhelm the cluster |
+| Hold expiry | Background worker | Redis key TTL + sync | Background worker is more reliable than Redis-Postgres sync |
 
 ---
 
-## Interview Flow Summary (Talk Track)
+### Summary Talk Track
 
-1. "The core problem in ticket booking is **preventing double-booking under high concurrency**"
-2. "The solution: **PostgreSQL row-level locks** — `SELECT FOR UPDATE` serializes access to each seat"
-3. "Flow: Browse (cached) → Select seats → Hold (DB lock, 10-min TTL) → Pay → Confirm"
-4. "Seat availability is cached in Redis (10s TTL) to handle read spikes"
-5. "For popular events: **virtual waiting room** — smooth the traffic spike with a queue"
-6. "Hold expiry is handled by a background worker — seats return to pool after 10 minutes"
+1. "The core problem in ticket booking is **preventing double-booking under high concurrency**."
+2. "Core entities: **Event**, **Showtime**, **Seat** (the critical resource), **Hold**, **Booking**."
+3. "The solution: **PostgreSQL row-level locks** — `SELECT FOR UPDATE` serializes access to each seat."
+4. "Flow: Browse (cached) → Select seats → Hold (DB lock, 10-min TTL) → Pay → Confirm."
+5. "Seat availability is cached in Redis (10s TTL) to handle read spikes."
+6. "For popular events: **virtual waiting room** — smooth the traffic spike with a queue."
 7. "CAP choice: **CP** — consistency over availability. A double booking is unacceptable."
 
 ---

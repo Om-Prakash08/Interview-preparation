@@ -5,7 +5,9 @@
 
 ---
 
-## SECTION 1 — Clarifying Questions (Ask These FIRST in Interview)
+## Step 1 — Requirements (~5 min)
+
+### 1.1 Clarifying Questions (Ask These FIRST)
 
 **Functional Scope:**
 - One-to-one messaging only, or also group chats?
@@ -28,11 +30,7 @@
 - Delivery receipts: sent, delivered, read
 - Push notifications for offline users
 
----
-
-## SECTION 2 — Functional & Non-Functional Requirements
-
-### Functional Requirements
+### 1.2 Functional Requirements (FR)
 1. One-to-one real-time messaging
 2. Group chats (up to 256 members)
 3. Message delivery receipts: Sent ✓ / Delivered ✓✓ / Read ✓✓ (blue)
@@ -40,7 +38,7 @@
 5. Push notifications for offline users
 6. Message history (retrieve past messages)
 
-### Non-Functional Requirements
+### 1.3 Non-Functional Requirements (NFR)
 | Property | Target |
 |---|---|
 | **Message Latency** | < 100ms delivery for online users |
@@ -49,41 +47,97 @@
 | **Durability** | No message loss — at-least-once delivery guarantee |
 | **Scalability** | 100 billion messages/day, 2 billion DAU |
 
-### Out of Scope (for MVP)
+### 1.4 Out of Scope (for MVP)
 - Payments (WhatsApp Pay)
 - Status/Stories
 - Calls (voice/video)
 
 ---
 
-## SECTION 3 — Capacity Estimation
+## Step 2 — Core Entities (~3 min)
 
-### Message Volume
-- 100 billion messages/day
-- = 100B / 86,400 ≈ **~1.15 million messages/sec**
-- Peak (assume 3× average): ~3.5 million messages/sec
+### 2.1 Entity Identification
 
-### Storage
-- Average message size: 100 bytes (text + metadata)
-- Per day: 100B × 100B = **10 TB/day**
-- Per year: **~3.6 PB/year** (WhatsApp stores 30 days on server)
-- 30-day retention: **~300 TB rolling window**
+```
+┌──────────────┐        ┌──────────────┐        ┌──────────────┐
+│   Message    │        │ Conversation │        │    User      │
+│              │        │              │        │              │
+│ message_id   │───────►│ conv_id      │◄───────│ user_id      │
+│ conv_id      │        │ type (1:1/   │        │ phone_number │
+│ sender_id    │        │   group)     │        │ display_name │
+│ text         │        │ last_preview │        │ is_online    │
+│ status       │        │ created_at   │        │ last_seen    │
+│ created_at   │        └──────┬───────┘        └──────────────┘
+└──────────────┘               │
+                      ┌────────▼───────┐
+                      │ ConvMember     │
+                      │                │
+                      │ conv_id        │
+                      │ user_id        │
+                      │ joined_at      │
+                      └────────────────┘
+```
 
-### Connections
-- 2 billion DAU, assume 10% online at peak = **200 million concurrent connections**
-- Each WebSocket connection: ~10 KB overhead
-- 200M × 10KB = **~2 TB RAM just for connections** — requires thousands of servers
+**Primary entities**: `Message` (content), `Conversation` (thread container), `ConversationMember` (who belongs to which chat), `User` (identity + presence).
 
-### Bandwidth
-- 1.15M messages/sec × 100 bytes = **~115 MB/s** inbound
+### 2.2 Data Model / Schema
+
+**Table 1: `messages`**
+```
+message_id    BIGINT       PRIMARY KEY  (Snowflake)
+conversation_id  BIGINT    NOT NULL
+sender_id     BIGINT
+text          TEXT
+status        ENUM('sent', 'delivered', 'read')
+created_at    TIMESTAMP
+```
+**DB Choice**: **Cassandra**
+- Partition by `conversation_id`, cluster by `message_id DESC`
+- Enables fast "give me last 50 messages in conversation X"
+- Write-heavy (1.15M writes/sec) — Cassandra's LSM tree is write-optimized
+
+**Table 2: `conversations`**
+```
+conversation_id  BIGINT   PRIMARY KEY
+type          ENUM('direct', 'group')
+created_at    TIMESTAMP
+last_message_preview  TEXT
+```
+
+**Table 3: `conversation_members`**
+```
+conversation_id  BIGINT
+user_id          BIGINT
+joined_at        TIMESTAMP
+PRIMARY KEY (conversation_id, user_id)
+```
+
+**Table 4: `users`**
+```
+user_id       BIGINT       PRIMARY KEY
+phone_number  VARCHAR(20)  UNIQUE
+display_name  VARCHAR(100)
+last_seen     TIMESTAMP
+is_online     BOOLEAN
+```
+**DB Choice**: PostgreSQL (low write volume, relational)
+
+**Message Status Tracking:**
+- Use a separate **Redis Hash** per message for delivery status:
+  ```
+  msg:{message_id} → { user_id_1: "delivered", user_id_2: "read" }
+  ```
+- Expire after 30 days (TTL)
+
+> 🎯 **NFR addressed**: **Durability** — Cassandra replication ensures no message loss. **Consistency** — Partition by conversation_id + clustering by message_id guarantees ordering within a conversation. **Scalability** — Cassandra's write-optimized LSM tree handles 1.15M writes/sec.
 
 ---
 
-## SECTION 4 — API Design
+## Step 3 — API or Interface (~5 min)
 
 WhatsApp uses **WebSocket** for real-time, and REST for non-real-time actions.
 
-### 1. Establish WebSocket Connection
+### 3.1 Establish WebSocket Connection
 ```
 WS wss://chat.whatsapp.com/ws
 Authorization: Bearer <token>
@@ -92,7 +146,7 @@ Authorization: Bearer <token>
 // Heartbeat ping/pong every 30 seconds to keep alive
 ```
 
-### 2. Send Message (over WebSocket)
+### 3.2 Send Message (over WebSocket)
 ```
 // Client → Server (WebSocket message frame)
 {
@@ -111,7 +165,7 @@ Authorization: Bearer <token>
 }
 ```
 
-### 3. Receive Message (Server → Client via WebSocket)
+### 3.3 Receive Message (Server → Client via WebSocket)
 ```
 // Server pushes to recipient
 {
@@ -130,7 +184,7 @@ Authorization: Bearer <token>
 }
 ```
 
-### 4. REST Endpoints
+### 3.4 REST Endpoints
 ```
 GET  /api/v1/conversations                        // list all chats
 GET  /api/v1/conversations/{conv_id}/messages     // fetch message history
@@ -138,60 +192,69 @@ POST /api/v1/groups                               // create group
 POST /api/v1/groups/{group_id}/members            // add member
 ```
 
----
-
-## SECTION 5 — Data Model & Database Choice
-
-### Table 1: `messages`
-```
-message_id    BIGINT       PRIMARY KEY  (Snowflake)
-conversation_id  BIGINT    NOT NULL
-sender_id     BIGINT
-text          TEXT
-status        ENUM('sent', 'delivered', 'read')
-created_at    TIMESTAMP
-```
-**DB Choice**: **Cassandra**
-- Partition by `conversation_id`, cluster by `message_id DESC`
-- Enables fast "give me last 50 messages in conversation X"
-- Write-heavy (1.15M writes/sec) — Cassandra's LSM tree is write-optimized
-
-### Table 2: `conversations`
-```
-conversation_id  BIGINT   PRIMARY KEY
-type          ENUM('direct', 'group')
-created_at    TIMESTAMP
-last_message_preview  TEXT
-```
-
-### Table 3: `conversation_members`
-```
-conversation_id  BIGINT
-user_id          BIGINT
-joined_at        TIMESTAMP
-PRIMARY KEY (conversation_id, user_id)
-```
-
-### Table 4: `users`
-```
-user_id       BIGINT       PRIMARY KEY
-phone_number  VARCHAR(20)  UNIQUE
-display_name  VARCHAR(100)
-last_seen     TIMESTAMP
-is_online     BOOLEAN
-```
-**DB Choice**: PostgreSQL (low write volume, relational)
-
-### Message Status Tracking
-- Use a separate **Redis Hash** per message for delivery status:
-  ```
-  msg:{message_id} → { user_id_1: "delivered", user_id_2: "read" }
-  ```
-- Expire after 30 days (TTL)
+> 🎯 **NFR addressed**: **Message Latency < 100ms** — WebSocket provides persistent bidirectional connection (no HTTP handshake overhead per message). **Availability** — REST fallback for history retrieval if WebSocket drops.
 
 ---
 
-## SECTION 6 — High-Level Architecture
+## Step 4 — Data Flow (~3 min)
+
+### 4.1 Capacity Estimation (Back-of-Envelope)
+
+**Message Volume:**
+- 100 billion messages/day
+- = 100B / 86,400 ≈ **~1.15 million messages/sec**
+- Peak (assume 3× average): ~3.5 million messages/sec
+
+**Storage:**
+- Average message size: 100 bytes (text + metadata)
+- Per day: 100B × 100B = **10 TB/day**
+- Per year: **~3.6 PB/year** (WhatsApp stores 30 days on server)
+- 30-day retention: **~300 TB rolling window**
+
+**Connections:**
+- 2 billion DAU, assume 10% online at peak = **200 million concurrent connections**
+- Each WebSocket connection: ~10 KB overhead
+- 200M × 10KB = **~2 TB RAM just for connections** — requires thousands of servers
+
+**Bandwidth:**
+- 1.15M messages/sec × 100 bytes = **~115 MB/s** inbound
+
+### 4.2 Data Flow Through System
+
+**Write Path (Sending a Message):**
+```
+Sender (Alice) → Chat Server A
+  → Chat Server A assigns message_id, persists to Cassandra
+  → Publishes to Kafka: { msg_id, to: Bob, ... }
+  → Kafka consumed by routing logic:
+       → Is Bob online? Check Connection Registry (Redis)
+       → YES: Bob is on Chat Server C → push via WebSocket
+       → NO: Bob is offline → Notification Service → APNs/FCM push notification
+  → Delivery ack flows back: Bob's client → Chat Server C → Kafka → Chat Server A → Alice
+```
+
+**Read Path (Loading Chat History):**
+```
+User opens conversation → REST GET /conversations/{id}/messages
+  → Message Service queries Cassandra (partition key = conversation_id)
+  → Returns last 50 messages, paginated by cursor
+```
+
+**Key Insight: Connection Registry**
+- With N chat servers, when Alice sends a message to Bob:
+  - How does Alice's server know which server Bob is connected to?
+  - **Solution**: **Redis Hash** maps `user_id → chat_server_id`
+  - When Bob connects, his Chat Server registers: `SET user:{bob_id} server_id`
+  - On disconnect: `DEL user:{bob_id}`
+  - Alice's server looks up Bob's server, then routes message to it via internal gRPC call
+
+> 🎯 **NFR addressed**: **Message Latency** — Connection Registry enables O(1) routing to correct server. **Durability** — Cassandra persists before delivery, so messages survive server crashes. **Scalability** — Kafka decouples message ingestion from delivery.
+
+---
+
+## Step 5 — High-level Design (~10 min)
+
+### 5.1 Architecture Diagram
 
 ```
                     ┌─────────────────────────────────────────────────┐
@@ -234,36 +297,22 @@ is_online     BOOLEAN
          └──────────────────────────────────────────────┘
 ```
 
-### Write Path (Sending a Message):
-```
-Sender (Alice) → Chat Server A
-  → Chat Server A assigns message_id, persists to Cassandra
-  → Publishes to Kafka: { msg_id, to: Bob, ... }
-  → Kafka consumed by routing logic:
-       → Is Bob online? Check Connection Registry (Redis)
-       → YES: Bob is on Chat Server C → push via WebSocket
-       → NO: Bob is offline → Notification Service → APNs/FCM push notification
-  → Delivery ack flows back: Bob's client → Chat Server C → Kafka → Chat Server A → Alice
-```
+### 5.2 Component Walkthrough
 
-### Read Path (Loading Chat History):
-```
-User opens conversation → REST GET /conversations/{id}/messages
-  → Message Service queries Cassandra (partition key = conversation_id)
-  → Returns last 50 messages, paginated by cursor
-```
+| Component | Role | Why This Choice |
+|---|---|---|
+| **Chat Servers** | Hold persistent WebSocket connections; relay messages | Each server handles ~10K connections; fleet of thousands for 200M connections |
+| **Kafka** | Async message bus between chat servers | Buffers delivery; ensures no message loss if consumer is down |
+| **Connection Registry (Redis)** | Maps `user_id → chat_server_id` | O(1) lookup to route messages to correct server; auto-expires on disconnect |
+| **Cassandra** | Durable message storage partitioned by conversation_id | Write-optimized for 1.15M msg/sec; fast range queries for chat history |
+| **Presence Service** | Tracks online/offline via Redis pub/sub | Lightweight heartbeat-based presence; pub/sub for real-time status updates |
+| **Notification Service** | Sends push via APNs/FCM for offline users | Fire-and-forget to OS push infrastructure |
 
-### Key Insight: Connection Registry
-- With N chat servers, when Alice sends a message to Bob:
-  - How does Alice's server know which server Bob is connected to?
-  - **Solution**: **Redis Hash** maps `user_id → chat_server_id`
-  - When Bob connects, his Chat Server registers: `SET user:{bob_id} server_id`
-  - On disconnect: `DEL user:{bob_id}`
-  - Alice's server looks up Bob's server, then routes message to it via internal gRPC call
+> 🎯 **NFR addressed**: **Availability 99.99%** — multiple chat servers; Kafka buffers during failures. **Message Latency < 100ms** — WebSocket + Redis connection registry = sub-100ms routing. **Scalability** — 200M connections distributed across thousands of chat servers. **Durability** — Cassandra persists every message before delivery.
 
 ---
 
-## SECTION 7 — Deep Dives
+## Step 6 — Deep Dives (~15 min)
 
 ### Deep Dive 1: Message Ordering
 
@@ -329,15 +378,15 @@ For the interview, mention E2EE as a consideration, but say "implementation of t
 
 ---
 
-## SECTION 8 — Trade-offs & Alternatives
+### Trade-offs & Alternatives
 
-### CAP Theorem Position
+**CAP Theorem Position:**
 **AP with eventual consistency for delivery receipts**
 - Message delivery itself must be reliable (at-least-once)
 - Delivery status (✓✓ vs ✓) can be slightly delayed — eventual consistency acceptable
 - If two servers disagree on Bob's online status momentarily, that's fine
 
-### Key Trade-offs Table
+**Key Trade-offs Table:**
 
 | Decision | Choice | Alternative | Reasoning |
 |---|---|---|---|
@@ -347,7 +396,7 @@ For the interview, mention E2EE as a consideration, but say "implementation of t
 | Group fan-out | Single copy + pointers | Multiple copies | Single copy saves 256× storage; pointers enable per-user read tracking |
 | Delivery guarantee | At-least-once + dedup | Exactly-once | Exactly-once requires distributed transactions — too slow at this scale |
 
-### What Would You Do Differently at Larger Scale?
+**What Would You Do Differently at Larger Scale?**
 - Dedicated **media server** with CDN for image/video delivery
 - **Regional clusters** (US, EU, Asia) to avoid cross-continental latency
 - **Message compression** (Zstandard) to reduce bandwidth by 60–70%
@@ -355,15 +404,16 @@ For the interview, mention E2EE as a consideration, but say "implementation of t
 
 ---
 
-## Interview Flow Summary (Talk Track)
+### Summary Talk Track
 
-1. "The core challenge here is **real-time delivery at 1.15M messages/sec with 200M concurrent connections**"
-2. "I'd use WebSocket for real-time messaging — persistent bidirectional connection"
-3. "The key problem: with many chat servers, how do I route a message to the right server? **Connection Registry in Redis**"
-4. "Messages are stored in Cassandra, partitioned by conversation_id"
-5. "For offline users, I fall back to APNs/FCM push notifications"
-6. "The hardest part is group messages — I'd use a single-copy-with-pointers approach to avoid fan-out explosion"
-7. "Delivery guarantee: at-least-once with client-generated UUIDs for deduplication"
+1. "The core challenge is **real-time delivery at 1.15M messages/sec with 200M concurrent connections**."
+2. "Core entities: **Message**, **Conversation**, **User** — messages partitioned by conversation for ordered retrieval."
+3. "I'd use **WebSocket** for real-time messaging — persistent bidirectional connection."
+4. "The key routing problem: with many chat servers, how do I route a message to the right one? **Connection Registry in Redis**."
+5. "Messages stored in Cassandra, partitioned by conversation_id for fast history queries."
+6. "For offline users, fall back to **APNs/FCM push notifications**."
+7. "Group messages use a **single-copy-with-pointers** approach to avoid fan-out explosion."
+8. "Delivery guarantee: **at-least-once** with client-generated UUIDs for deduplication."
 
 ---
 

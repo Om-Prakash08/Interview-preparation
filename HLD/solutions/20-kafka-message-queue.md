@@ -1,439 +1,289 @@
 # 20. Design Kafka / Distributed Message Queue
 
-> **Difficulty**: Very Hard | **Asked At**: LinkedIn (Kafka's birthplace), Uber, Netflix, Confluent
+> **Difficulty**: Very Hard | **Asked At**: LinkedIn, Uber, Netflix, Amazon, Confluent
 > **Time to Answer in Interview**: 40–45 minutes
-> **Note**: You're designing the message queue itself, not using it.
+> **Note**: You are designing the message queue platform itself, not using one.
 
 ---
 
-## SECTION 1 — Clarifying Questions (Ask These FIRST in Interview)
+## Step 1 — Requirements (~5 min)
 
-**Functional Scope:**
-- Point-to-point (queue) or publish-subscribe (topic)?
-- What delivery guarantee: at-most-once, at-least-once, or exactly-once?
-- Do consumers need to read messages in order?
-- Message replay — can consumers re-read old messages?
-- Push to consumers or pull by consumers?
-- How long are messages retained?
+### 1.1 Clarifying Questions (Ask These FIRST)
+- Point-to-point (Queue) or Publish-Subscribe (Topic with Partitioning)?
+- What delivery guarantees: At-most-once, At-least-once, or Exactly-once?
+- Ordering requirements? (Per partition vs Global)
+- Message replay ability? (Retain messages on disk)
+- Push-based or Pull-based consumer model?
+- Target scale (Throughput, message size)?
 
-**Scale:**
-- How many messages per second?
-- Average message size?
-- Number of producers and consumers?
+**Typical Interviewer Answer:** Publish-Subscribe model with topic partitioning. At-least-once delivery by default (support producer idempotency). Ordering guaranteed per partition. Pull-based consumers. Messages retained for 7 days. Target: 1 Million messages/sec, 1 KB avg message size.
 
-**Typical Interviewer Answer:**
-- Publish-subscribe (topics with partitions)
-- At-least-once delivery by default (producers can opt for exactly-once)
-- Ordering within a partition (not globally)
-- Message replay: yes (retained for 7 days)
-- Pull-based consumers
-- 1 million messages/sec, average 1 KB message
-- Support for 1000+ topics, millions of consumer groups
+### 1.2 Functional Requirements (FR)
+1. **Publish**: Producers publish messages to named topics with optional partitioning keys.
+2. **Partitioned Storage**: Topics divided into partitions for parallel throughput; messages ordered sequentially per partition.
+3. **Consume**: Consumer groups pull messages from assigned partitions and commit offsets.
+4. **Message Replay**: Consumers can seek to any valid offset within the 7-day retention period.
+5. **Replication**: High availability & fault tolerance via Primary-Replica partition replication.
 
----
-
-## SECTION 2 — Functional & Non-Functional Requirements
-
-### Functional Requirements
-1. Producers publish messages to named topics
-2. Topics divided into partitions for parallelism
-3. Messages within a partition are ordered
-4. Consumer groups pull messages from partitions
-5. Each consumer group maintains its own offset (position)
-6. Messages retained for configurable period (default 7 days)
-7. Message replay: consumers can seek to any offset
-
-### Non-Functional Requirements
+### 1.3 Non-Functional Requirements (NFR)
 | Property | Target |
 |---|---|
-| **Throughput** | 1 million messages/sec write, 2 million/sec read |
-| **Latency** | Message available to consumers within 10ms of publish |
-| **Durability** | No message loss after acknowledgement |
-| **Availability** | 99.99% |
-| **Scalability** | Horizontal scaling by adding brokers/partitions |
-| **Ordering** | Strict ordering within a partition |
+| **Write Throughput** | 1 Million msgs/sec write ($1\text{ GB/s}$ payload, $3\text{ GB/s}$ disk write I/O with $3\times$ replication) |
+| **Read Throughput** | 2 Million msgs/sec read |
+| **End-to-End Latency** | $< 10\text{ms}$ write ack and consumer availability |
+| **Durability** | Zero message loss when producer `acks=all` |
+| **Scalability** | Horizontal scaling by adding brokers or partitions |
 
-### Out of Scope
-- Kafka Streams (stream processing)
-- Kafka Connect (source/sink connectors)
-- Schema Registry
+### 1.4 Out of Scope
+- Stream processing engine (Kafka Streams / Flink)
+- Schema Registry / Protobuf compiler integrations
 
 ---
 
-## SECTION 3 — Capacity Estimation
+## Step 2 — Core Entities (~3 min)
 
-### Messages
-- 1M messages/sec × 1 KB = **1 GB/s write throughput**
-- With replication factor 3: **3 GB/s total write I/O**
+### 2.1 Entity Identification
 
-### Retention Storage
-- 1 GB/s × 86,400 sec × 7 days retention = **~605 TB per week**
-- With replication × 3: **~1.8 PB** total storage
+```
+┌──────────────────────────┐
+│   Broker                 │
+│  broker_id, host, port   │
+└────────────┬─────────────┘
+             │ Hosts 1 or more
+             ▼
+┌──────────────────────────┐       ┌──────────────────────────┐
+│   Partition Leader       │──────►│   Partition Replica      │
+│  topic_name, part_id     │       │  follower_broker_id      │
+│  high_watermark (HW)     │       │  log_end_offset (LEO)    │
+└────────────┬─────────────┘       └──────────────────────────┘
+             │ Manages
+             ▼
+┌──────────────────────────┐       ┌──────────────────────────┐
+│   Log Segment (.log)     │──────►│   Index File (.index)    │
+│  base_offset             │       │  relative_offset         │
+│  binary_records_seq      │       │  physical_file_position  │
+└──────────────────────────┘       └──────────────────────────┘
+```
 
-### Brokers
-- Single broker: ~500 MB/s write throughput (SSD-bound)
-- Brokers needed for write: 3 GB/s / 500 MB/s = **~6 broker nodes minimum**
-- With replication: data distributed → 6 brokers with 300 TB SSD each
+### 2.2 Data Model / Schema
 
-### Topics & Partitions
-- 1000 topics × avg 20 partitions = **20,000 partitions total**
-- Each partition = 1 append-only log on 1 broker (primary)
-- Partitions distributed across 6 brokers: ~3,333 partitions per broker
+**Physical Disk Log Structure (Per Partition Directory on Broker)**
+```
+/var/lib/kafka/data/orders-partition-0/
+  ├── 00000000000000000000.log        <-- Append-only binary log segment file
+  ├── 00000000000000000000.index      <-- Sparse index (offset -> position)
+  ├── 00000000000000000000.timeindex  <-- Sparse index (timestamp -> offset)
+  ├── leader-epoch-checkpoint         <-- Leader election fencing
+```
+
+**Binary Record Header Format in `.log` File**
+```
+[Offset: 8B] [Timestamp: 8B] [KeySize: 4B] [ValueSize: 4B] [CRC: 4B] [KeyBytes] [ValueBytes]
+```
+
+**Consumer Offset Tracking Internal Topic (`__consumer_offsets`)**
+```
+Key:   { "group_id": "analytics-svc", "topic": "orders", "partition": 0 }
+Value: { "offset": 1004523, "timestamp": 1722000000 }
+```
+
+> 🎯 **NFR addressed**: **Durability & Throughput** — Sequential binary disk logging enables $3\text{ GB/s}$ I/O; Zero-Copy `sendfile()` serves consumers without kernel memory copies.
 
 ---
 
-## SECTION 4 — API Design
+## Step 3 — API or Interface (~5 min)
 
-### Producer API
-```python
-# Create producer
-producer = KafkaProducer(
-    bootstrap_servers=["broker1:9092", "broker2:9092"],
-    acks="all",               # wait for all in-sync replicas to ack
-    enable_idempotence=True,  # exactly-once at producer level
-    compression_type="snappy",
-    batch_size=16384,         # batch messages up to 16KB
-    linger_ms=5               # wait up to 5ms for more messages to batch
-)
-
-# Send message
-future = producer.send(
-    topic="user-events",
-    key="user_12345".encode(),    # determines partition
-    value=json.dumps(event).encode(),
-    headers=[("event-type", b"purchase")]
-)
-
-# Block for ack (or use callback for async)
-record_metadata = future.get(timeout=10)
-# record_metadata.topic, record_metadata.partition, record_metadata.offset
+### 3.1 Producer API (`ProduceRequest`)
+```
+POST /broker/produce
+Headers: { Acks: "all" | "1" | "0", TimeoutMs: 5000 }
+Payload:
+{
+  "topic": "orders",
+  "partition": 2, // or computed via hash(key) % total_partitions
+  "messages": [
+    { "key": "user_101", "value": "{\"order_id\": 555}", "timestamp": 1722000000 }
+  ]
+}
+Response: { "partition": 2, "base_offset": 1004523, "error_code": 0 }
 ```
 
-### Consumer API
-```python
-consumer = KafkaConsumer(
-    "user-events",                 # topic name
-    bootstrap_servers=["broker1:9092"],
-    group_id="analytics-service", # consumer group
-    auto_offset_reset="earliest",  # start from beginning if no committed offset
-    enable_auto_commit=False       # manual offset management for at-least-once
-)
-
-for message in consumer:
-    # message.topic, message.partition, message.offset, message.value
-    process(message.value)
-    consumer.commit()              # commit AFTER processing (at-least-once)
+### 3.2 Consumer API (`FetchRequest`)
+```
+POST /broker/fetch
+Payload:
+{
+  "group_id": "analytics-svc",
+  "topic": "orders",
+  "partition": 2,
+  "fetch_offset": 1004500,
+  "max_bytes": 1048576 // 1MB batch
+}
+Response: { "high_watermark": 1004523, "messages": [ ... ] }
 ```
 
-### Admin API
+### 3.3 Offset Commit API
 ```
-// Create topic
-CreateTopicRequest { topic="orders", partitions=20, replication_factor=3 }
+POST /broker/commit_offset
+Payload: { "group_id": "analytics-svc", "topic": "orders", "partition": 2, "offset": 1004523 }
+```
 
-// Describe consumer group lag
-DescribeGroupRequest { group_id="analytics-service" }
-→ { topic="orders", partition=5, current_offset=1000000, latest_offset=1000100, lag=100 }
-```
+> 🎯 **NFR addressed**: **Latency < 10ms** — Batching multiple records inside `ProduceRequest` & `FetchRequest` drastically cuts TCP network overhead.
 
 ---
 
-## SECTION 5 — Core Data Structures
+## Step 4 — Data Flow (~3 min)
 
-### The Log (Heart of Kafka)
+### 4.1 Capacity Estimation
 
-Each partition is an **append-only log** stored on disk:
+- **Write Rate**: 1M msgs/sec × 1 KB payload = **1 GB/s ingress payload**.
+- **Replication**: Factor of 3 ($1\text{ GB/s} \times 3 = 3\text{ GB/s}$ disk write load across brokers).
+- **Storage**: 1 GB/s × 86,400s × 7 days = **~605 TB raw logs**, with $3\times$ replication = **~1.8 PB total cluster storage**.
+- **Broker Count**: A high-end server SSD writes ~500 MB/s sequential. 3 GB/s / 500 MB/s = **Minimum 6 Broker Nodes**.
+
+### 4.2 Data Flow Through System
 
 ```
-Partition 0 of topic "orders":
-  
-  Segment 1 (offsets 0 to 99,999):
-    orders-0-00000000000000000000.log  ← binary file, sequential writes
-    orders-0-00000000000000000000.index ← offset → file position mapping
-    orders-0-00000000000000000000.timeindex ← timestamp → offset mapping
-
-  Segment 2 (offsets 100,000 to 199,999):
-    orders-0-00000000000000100000.log
-    orders-0-00000000000000100000.index
-
-  Active Segment (newest, being written to):
-    orders-0-00000000000001234000.log  ← all writes go here
-
-Message format in .log file:
-  [offset(8B)][timestamp(8B)][key_size(4B)][value_size(4B)][key][value]
-
-Message retrieval at offset N:
-  1. Binary search .index file → find file position of offset N (O(log M))
-  2. Seek to file position in .log file → read message (O(1) disk seek)
+PRODUCER                                BROKER LEADER                              CONSUMER
+   │                                         │                                         │
+   ├─── 1. Send ProduceBatch(Partition 0)───►│                                         │
+   │                                         ├── 2. Append sequentially to             │
+   │                                         │      active .log file                   │
+   │                                         │                                         │
+   │                                         ├── 3. Replicate to ISR Replicas          │
+   │                                         │      (In-Sync Replicas)                 │
+   │                                         │                                         │
+   │◄── 4. Ack (after ISR quorum acked) ─────┤                                         │
+   │    High Watermark (HW) advanced         │                                         │
+   │                                         │◄── 5. FetchRequest(offset=100) ──────────┤
+   │                                         │                                         │
+   │                                         ├── 6. Zero-Copy `sendfile()`             │
+   │                                         │      transfer disk -> NIC               │
+   │                                         │                                         │
+   │                                         ├──── 7. Return Batch Data ──────────────►│
+   │                                         │                                         │
+   │                                         │◄── 8. CommitOffset(offset=150) ─────────┤
 ```
 
-**Why append-only log?**
-- Sequential disk writes: 500 MB/s (HDD) or 3 GB/s (SSD)
-- vs Random writes: 0.5–100 MB/s
-- Append-only is 10–100× faster than random writes
+> 🎯 **NFR addressed**: **Durability & Latency** — Zero-Copy bypassing OS user space makes network transfers bound only by NIC limits.
 
 ---
 
-## SECTION 6 — High-Level Architecture
+## Step 5 — High-level Design (~10 min)
+
+### 5.1 Architecture Diagram
 
 ```
-PRODUCERS                          KAFKA CLUSTER                    CONSUMERS
-─────────                          ─────────────                    ─────────
-Order Service                       ┌──────────────────────────┐    Analytics
-Payment Service  ──────── push ──► │    Broker 1 (Leader)     │    Service
-Inventory Svc                       │  Partition 0: Leader     │
-                                    │  Partition 3: Replica    │ ◄── pull ── Email
-                                    │  Partition 6: Replica    │             Service
-                                    └──────────────────────────┘
-                                    ┌──────────────────────────┐
-                                    │    Broker 2              │    ┌──────────────────┐
-                                    │  Partition 0: Replica    │    │  Consumer Groups │
-                                    │  Partition 1: Leader     │    │                  │
-                                    │  Partition 4: Replica    │    │  analytics-svc   │
-                                    └──────────────────────────┘    │  C1: partition 0 │
-                                    ┌──────────────────────────┐    │  C2: partition 1 │
-                                    │    Broker 3              │    │  C3: partition 2 │
-                                    │  Partition 2: Leader     │    │                  │
-                                    │  Partition 0: Replica    │    │  email-svc       │
-                                    │  Partition 5: Leader     │    │  C1: partition 0 │
-                                    └──────────────────────────┘    │      to 2 (all)  │
-                                                                     └──────────────────┘
-                                    ┌──────────────────────────┐
-                                    │   ZooKeeper / KRaft      │
-                                    │   (Cluster coordinator)  │
-                                    │   - Broker membership    │
-                                    │   - Leader election      │
-                                    │   - Consumer group coord │
-                                    └──────────────────────────┘
-
-WRITE PATH (Producer → Kafka):
-  1. Producer serializes message
-  2. Producer computes partition: hash(key) % num_partitions
-     (or round-robin if no key)
-  3. Producer sends to correct broker (leader of that partition)
-  4. Leader writes to local log file (sequential I/O)
-  5. Leader replicates to in-sync replicas (ISR)
-  6. After ISR acks: leader sends ack to producer
-  7. Message now "committed" (safe to read by consumers)
-
-READ PATH (Consumer ← Kafka):
-  1. Consumer sends FETCH request to broker
-     { topic, partition, offset, max_bytes }
-  2. Broker seeks to offset in .index file
-  3. Reads up to max_bytes from .log file
-  4. Returns batch of messages
-  5. Consumer processes messages, then commits offset
-  6. Consumer loop repeats from step 1
+PRODUCERS                            KAFKA BROKER CLUSTER                   CONSUMER GROUPS
+ ┌─────────────────┐                 ┌───────────────────────────┐          ┌─────────────────┐
+ │ Order Service   │                 │ Broker 1                  │          │ Analytics Group │
+ │ (Producer App)  ├───── Produce───►│  - Topic A (Part 0 Leader)│◄──Fetch──┤  - Consumer 1   │
+ └─────────────────┘                 │  - Topic A (Part 1 Follow)│          │  - Consumer 2   │
+                                     └─────────────┬─────────────┘          └─────────────────┘
+ ┌─────────────────┐                               │ Replication
+ │ Payment Service │                 ┌─────────────▼─────────────┐          ┌─────────────────┐
+ │ (Producer App)  ├───── Produce───►│ Broker 2                  │          │ Email Group     │
+ └─────────────────┘                 │  - Topic A (Part 1 Leader)│◄──Fetch──┤  - Consumer 1   │
+                                     │  - Topic A (Part 0 Follow)│          └─────────────────┘
+                                     └───────────────────────────┘
+                                                   │
+                                     ┌─────────────▼─────────────┐
+                                     │ Cluster Coordinator       │
+                                     │ (KRaft / ZooKeeper)       │
+                                     │ - Leader election         │
+                                     │ - Broker heartbeat        │
+                                     └───────────────────────────┘
 ```
+
+### 5.2 Component Walkthrough
+
+| Component | Role | Why This Choice |
+|---|---|---|
+| **Broker** | Manages partition logs, handles IO | Sequential append-only disk storage yields massive I/O throughput |
+| **Partition Leader** | Serves all writes and reads | Simplifies strict ordering guarantees per partition |
+| **ISR (In-Sync Replicas)**| Active follower replicas | Ensures zero data loss on leader crash ($acks=all$) |
+| **KRaft / ZooKeeper** | Metadata & Controller Election | Manages metadata state, partition re-assignment, and leader failover |
+| **Consumer Group** | Scalable consumption team | Partitions are dynamically load-balanced among active consumers in a group |
+
+> 🎯 **NFR addressed**: **Scalability & Availability 99.99%** — Horizontal partition re-assignment during broker failure via KRaft controller.
 
 ---
 
-## SECTION 7 — Deep Dives
+## Step 6 — Deep Dives (~15 min)
 
-### Deep Dive 1: Partitioning Strategy
+### Deep Dive 1: High-Performance Disk I/O Architecture
 
-**Why partitions?**
-- A single partition = single-threaded writes → bottleneck
-- More partitions → more parallelism for both producers and consumers
+**Why Kafka is fast on traditional disk storage:**
 
-**Partition assignment:**
 ```
-Producer with key:
-  partition = hash(key) % num_partitions
-  → All messages with same key → same partition → ordered per key
+1. Sequential Disk Writes:
+   - Random Disk IO: 100-200 IOPS (~1 MB/s).
+   - Sequential Disk Writes: ~500 MB/s (HDD/SSD).
+   - Append-only log architecture transforms all writes into fast sequential operations.
 
-Example: user_id as key
-  All "user_12345" events → partition 7 (always)
-  All "user_99999" events → partition 3 (always)
-  Consumers on partition 7 see all events for user_12345 in order
+2. OS Page Cache & Zero-Copy:
+   Standard Read Path (4 Context Switches + 2 Memory Copies):
+   Disk -> OS Page Cache -> JVM User Space Buffer -> Socket Buffer -> NIC
 
-Producer without key:
-  Round-robin across partitions (or sticky partitioner for batching)
-  → Even distribution → higher throughput
-  → No ordering guarantee across messages
-```
-
-**How many partitions?**
-```
-Rule of thumb: max(producer throughput, consumer throughput) / single-partition throughput
-
-Example:
-  Target: 1 GB/s write, single partition handles 50 MB/s
-  Partitions: 1000/50 = 20 partitions minimum
-
-More partitions = more parallelism BUT:
-  - More files open (OS limits)
-  - More replication overhead
-  - Leader election during broker failure takes longer
-  - Sweet spot: 20–100 partitions per topic for most use cases
+   Kafka Zero-Copy sendfile() Path (0 CPU Memory Copies):
+   Disk -> OS Page Cache ------------------------> NIC Transmit Buffer (via DMA Engine)
+   Result: CPU utilization remains near zero even at 2 GB/s read rates!
 ```
 
 ---
 
-### Deep Dive 2: Replication (In-Sync Replicas)
+### Deep Dive 2: Sparse Indexing & Offset Lookup Mechanics
 
 ```
-For each partition: 1 leader + N-1 followers (replicas)
-  leader_epoch tracks which broker is current leader
+Log File Segment (orders-00000.log):
+Offset 0:     [Record 0, Payload]
+Offset 100:   [Record 100, Payload]
+Offset 200:   [Record 200, Payload]
 
-Leader:
-  - Handles all reads and writes (followers don't serve reads in Kafka)
-  - Maintains ISR list (In-Sync Replicas) — followers that are caught up
+Sparse Index File (orders-00000.index):
+Relative Offset: 0   -> Physical File Position: 0 bytes
+Relative Offset: 100 -> Physical File Position: 4096 bytes
+Relative Offset: 200 -> Physical File Position: 8192 bytes
 
-Follower:
-  - Continuously fetches messages from leader (same FETCH API as consumers)
-  - If follower falls behind by >10 seconds: removed from ISR
-
-Commit protocol:
-  1. Leader writes message to local log
-  2. Followers fetch and acknowledge
-  3. When ALL ISR acknowledge: message is "committed" (safe to read)
-  4. Leader updates high watermark (HW = offset of last committed message)
-  5. Consumer can only read up to HW (committed messages only)
-
-acks settings:
-  acks=0: producer doesn't wait → fastest, possible data loss
-  acks=1: leader acks immediately after local write → ISR lag = data loss risk
-  acks=all: wait for all ISR → slowest, no data loss
+Lookup Algorithm for Offset N = 150:
+1. Binary search index file -> Find index entry closest to 150 (Offset 100 -> Pos 4096).
+2. Seek directly to position 4096 in .log file.
+3. Scan sequentially from 4096 until Offset 150 is read.
 ```
 
 ---
 
-### Deep Dive 3: Consumer Groups & Partition Assignment
+### Deep Dive 3: Producer Idempotency & Exactly-Once Semantics (EOS)
 
 ```
-Consumer Group: logical grouping of consumers that collectively read a topic
+Problem: Network timeout occurs after Leader appends message, but before Ack reaches Producer.
+Producer retries -> Duplicate message appended!
 
-Rule: each partition assigned to exactly 1 consumer in a group
-  
-Example: Topic "orders" has 6 partitions
-  Consumer Group "analytics" has 3 consumers:
-    C1: handles partitions 0, 1
-    C2: handles partitions 2, 3
-    C3: handles partitions 4, 5
-
-If C2 dies (consumer crash):
-  → Group Coordinator (one broker acts as coordinator) detects missing heartbeat
-  → Triggers REBALANCE
-  → C1 now handles 0, 1, 2, 3 (or C1 and C3 split C2's partitions)
-
-If C4 joins:
-  → Triggers REBALANCE
-  → Partitions redistributed: each consumer gets ~1.5 partitions
-  → C1: 0,1; C2: 2,3; C3: 4; C4: 5
-
-Offset management:
-  Consumer commits offset to __consumer_offsets topic (internal Kafka topic)
-  On restart: consumer reads its committed offset, resumes from there
-  Consumer lag = latest_offset - committed_offset
+Solution: Producer ID (PID) + Sequence Number Deduplication
+  1. Each Producer is assigned a 64-bit PID on initialization.
+  2. Every message sent to a Partition contains: { PID, Sequence_Number }.
+  3. Broker tracks the highest sequence number per PID for each Partition.
+  4. If Incoming Sequence_Number <= Broker Stored Sequence_Number -> Broker discards duplicate, sends Ack!
 ```
 
 ---
 
-### Deep Dive 4: Exactly-Once Semantics (EOS)
-
-**The hardest problem in distributed messaging:**
-
-```
-Challenge: Network drops between produce and ack → producer retries → duplicate!
-
-Solution: Idempotent Producer + Transactional API
-
-Idempotent Producer (exactly-once per session):
-  Producer ID (PID) assigned by broker on connect
-  Each message tagged with: { PID, sequence_number }
-  Broker deduplicates: if it sees same PID + sequence_number → discard duplicate
-  Sequence numbers are per-partition, monotonically increasing
-
-Transactional Producer (atomic across multiple partitions/topics):
-  1. producer.begin_transaction()
-  2. producer.send("orders", order_msg)
-  3. producer.send("inventory", inventory_msg)
-  4. producer.send_offsets_to_transaction(consumer_offsets)
-  5. producer.commit_transaction()
-
-  → Either ALL messages committed, or NONE
-  → Enables "read-process-write" cycles to be atomic
-  → Consumer with isolation_level=read_committed won't see messages from aborted transactions
-```
-
----
-
-### Deep Dive 5: Log Retention & Cleanup
-
-**Time-based retention:**
-```
-log.retention.hours = 168  (7 days default)
-When a log segment's newest message is older than 7 days:
-  → Delete the entire segment file
-  → Cannot delete individual messages (log is immutable)
-```
-
-**Size-based retention:**
-```
-log.retention.bytes = 1099511627776  (1 TB per partition)
-When partition exceeds 1 TB:
-  → Delete oldest segment until under limit
-```
-
-**Compaction (alternative to deletion):**
-```
-For topics where only the LATEST value per key matters (like a database changelog):
-
-Original log:
-  [user:1, "Alice"] [user:2, "Bob"] [user:1, "Alice Smith"] [user:3, "Charlie"]
-
-After compaction:
-  [user:1, "Alice Smith"] [user:2, "Bob"] [user:3, "Charlie"]
-  
-→ Only latest value per key retained
-→ Used for: event sourcing, CDC (Change Data Capture), configuration topics
-→ Compaction runs in background, doesn't block reads/writes
-```
-
----
-
-## SECTION 8 — Trade-offs & Alternatives
-
-### CAP Theorem Position
-**CP (Consistency + Partition Tolerance)** by default:
-- With `acks=all`: consistent — no message loss even during network partition
-- During partition: leader may pause and wait for ISR quorum → availability reduced
-- **AP option**: with `acks=1` or `acks=0` → higher availability, risk of data loss
-
-### Comparison with Alternatives
-
-| Feature | Kafka | RabbitMQ | Amazon SQS | Pulsar |
-|---|---|---|---|---|
-| Model | Pub-Sub (log) | Queue + Pub-Sub | Queue | Pub-Sub (log) |
-| Message Retention | 7 days (configurable) | Until consumed | 14 days | Tiered (unlimited) |
-| Replay | Yes (seek to any offset) | No | No | Yes |
-| Throughput | 1M+ msg/sec | 100K msg/sec | 100K msg/sec | 1M+ msg/sec |
-| Ordering | Per-partition | Per-queue | Not guaranteed | Per-partition |
-| Consumer Model | Pull | Push + Pull | Pull | Pull |
-| Use When | High throughput, replay needed | Simple work queues | AWS-native | Kafka alternative with tiers |
-
-### Key Trade-offs
+### Trade-offs & Alternatives
 
 | Decision | Choice | Alternative | Reasoning |
 |---|---|---|---|
-| Storage | Append-only log | Random-access DB | Sequential writes 100× faster; enables replay |
-| Consumer model | Pull | Push | Pull lets consumer control pace; push can overwhelm slow consumers |
-| Replication | ISR quorum | All replicas | ISR avoids waiting for slow replicas while maintaining safety |
-| Partition assignment | Static (hash of key) | Dynamic | Static is predictable, enables key-based ordering; dynamic is flexible but loses ordering |
-| Leader reads | Leader only | Any ISR can serve reads | Leader-only simplifies consistency; follower reads possible in KIP-392 for geo-locality |
+| **Consumer Model** | Pull-based | Push-based | Pull allows consumers to process at their own pace without buffer overflow |
+| **Storage Engine** | Append-only Log | RocksDB / InnoDB B-Tree | B-Trees cause random disk IO and page splits; Append-only log is purely sequential |
+| **Ordering** | Per-Partition | Global Topic Ordering | Global ordering forces a single thread/partition, destroying horizontal scaling |
 
 ---
 
-## Interview Flow Summary (Talk Track)
+### Summary Talk Track
 
-1. "Kafka's core abstraction is the **append-only commit log** per partition — sequential writes give 3 GB/s throughput"
-2. "Topics → Partitions → Segments (files). Messages addressed by {topic, partition, offset}."
-3. "**Producers** compute partition by `hash(key) % N` — ensures ordering per key"
-4. "**Replication**: leader + ISR followers. `acks=all` → no data loss. Consumer reads only committed (HW) messages."
-5. "**Consumer Groups**: each partition assigned to exactly 1 consumer. Rebalance on member join/leave."
-6. "**Offset** is the consumer's bookmark — pulled, committed manually → at-least-once"
-7. "**Exactly-once**: Idempotent Producer (PID + seq dedup) + Transactions (atomic cross-partition writes)"
-8. "Retention: time-based (7 days), size-based (1 TB/partition), or compaction (keep latest per key)"
+1. "We design Kafka as an **append-only, partitioned commit log** optimized for sequential disk I/O."
+2. "To achieve **1 Million msgs/sec write throughput**, we utilize sequential logging, OS Page Cache, and batch compression."
+3. "To achieve massive read performance, we implement **Zero-Copy `sendfile()`**, bypassing JVM user space to stream disk cache directly to NIC buffers."
+4. "Durability is guaranteed using **In-Sync Replicas (ISR)** with `acks=all`, while idempotency is enforced via **PID + Sequence Numbers**."
 
 ---
 

@@ -5,468 +5,298 @@
 
 ---
 
-## SECTION 1 — Clarifying Questions (Ask These FIRST in Interview)
+## Step 1 — Requirements (~5 min)
 
-**Functional Scope:**
-- What are we recommending? Products? Movies? Songs? Articles? Friends?
-- What signals do we use? Explicit (ratings) vs implicit (clicks, time spent)?
-- Cold start problem: new users with no history?
-- Real-time recommendations (homepage) or batch (email digest)?
-- Diversity requirement? (don't recommend same genre 10 times in a row)
+### 1.1 Clarifying Questions (Ask These FIRST)
+- What type of items are being recommended? (Movies / Videos like Netflix)
+- What feedback signals are available? (Explicit ratings + implicit watch time/clicks)
+- How do we handle cold start for new users or new items?
+- What are the serving latency requirements? (< 100ms)
+- Do we need real-time recommendations or precomputed batch recommendations?
+- Scale: How many users and catalog items?
 
-**Scale:**
-- How many users?
-- How many items to recommend from?
-- How often are recommendations refreshed?
+**Typical Interviewer Answer:** Movie recommendations for 200 Million active users, 50,000 catalog items. Support explicit ratings (1-5 stars) and implicit feedback (watch completion %, clicks, skips). Serve recommendations in < 100ms. Handle cold-start gracefully.
 
-**Typical Interviewer Answer:**
-- Movie/video recommendations (like Netflix)
-- Both explicit (ratings) + implicit (watch time, clicks) signals
-- 200 million users, 50,000 titles
-- Homepage recommendations refreshed every hour
-- New user cold start must be handled
+### 1.2 Functional Requirements (FR)
+1. **Personalized Top-K Recommendations**: Generate personalized top 20 movie recommendations for homepage rows.
+2. **Multi-Signal Ingestion**: Ingest explicit user ratings and implicit user interactions (clicks, watch time, skips).
+3. **Cold Start Strategy**: Recommend relevant content for new users with zero history and newly added catalog titles.
+4. **Diversity & Business Rules**: Enforce content diversity (avoid recommending 10 movies of identical sub-genres) and apply filters (remove already-watched titles).
 
----
-
-## SECTION 2 — Functional & Non-Functional Requirements
-
-### Functional Requirements
-1. For a given user, generate a personalized list of recommended items (top-K)
-2. Recommendations consider both explicit (ratings) and implicit feedback (watch time)
-3. Handle cold start: new users with no history get reasonable recommendations
-4. Recommendations reflect recent activity (last watched movie influences next recommendation)
-5. Diversity: don't recommend only one type of content
-
-### Non-Functional Requirements
+### 1.3 Non-Functional Requirements (NFR)
 | Property | Target |
 |---|---|
-| **Freshness** | Recommendations updated within 1 hour of user activity |
-| **Latency** | Serve recommendations in < 100ms |
-| **Scale** | 200M users × recommendations refresh per hour = 200M rec computations/hour |
-| **Coverage** | All users get recommendations (including cold-start users) |
+| **Serving Latency** | $< 100\text{ms}$ end-to-end (cached precomputed recs $< 10\text{ms}$) |
+| **Freshness** | Recommendations update within 1 hour of significant user watch activity |
+| **Scale** | 200M DAU, 5 homepage loads/day = 1B rec requests/day (~11,500 requests/sec avg) |
+| **Availability** | 99.99% homepage recommendation availability |
 
-### Out of Scope
-- Real-time bid optimization (ads)
-- Trending recommendations (different system)
-- A/B testing framework (mention as extension)
-
----
-
-## SECTION 3 — Capacity Estimation
-
-### Recommendation Generation
-- 200M users × 1 regen/hour = **~56,000 regen jobs/sec** (if spread evenly)
-- Each regen: score 50,000 titles per user — needs optimization (candidate retrieval)
-
-### Serving
-- 200M DAU × 5 homepage loads/day = 1 billion serving requests/day
-- = **~11,500 serving requests/sec**
-- Precomputed recommendations → served from Redis in < 1ms
-
-### Training Data
-- 200M users × 10 events/day = 2 billion implicit feedback events/day
-- = **~23,000 events/sec** → Kafka → training pipeline
-
-### Storage
-- User-item matrix: 200M users × 50K items × sparse = only ~1% filled
-- Stored as (user_id, item_id, rating_or_weight) tuples: ~100B entries × 20 bytes = **~2 TB**
-- User embedding vectors: 200M users × 128 dim × 4 bytes = **~100 GB**
-- Item embedding vectors: 50K items × 128 dim × 4 bytes = **~25 MB** (tiny)
+### 1.4 Out of Scope
+- Ad bidding / real-time dynamic pricing
+- Trending / Global Top 10 lists (handled by separate aggregation system)
 
 ---
 
-## SECTION 4 — API Design
+## Step 2 — Core Entities (~3 min)
 
-### 1. Get Recommendations for User
+### 2.1 Entity Identification
+
 ```
-GET /api/v1/recommendations/{user_id}?context=homepage&limit=20
-Response: {
-  "user_id": "u123",
+┌──────────────────────────┐       ┌──────────────────────────┐       ┌──────────────────────────┐
+│   User Embedding Vector  │       │  Item Embedding Vector   │       │  User Feedback Event     │
+│                          │       │                          │       │                          │
+│  user_id                 │       │  item_id                 │       │  user_id, item_id        │
+│  vector [128 floats]     │       │  vector [128 floats]     │       │  event_type (watch/click)│
+│  updated_at              │       │  updated_at              │       │  weight (0.0 to 1.0)     │
+└────────────┬─────────────┘       └────────────┬─────────────┘       └──────────────────────────┘
+             │                                  │
+             └────────────────┬─────────────────┘
+                              │ Dot Product Vector Match
+                              ▼
+               ┌──────────────────────────────┐
+               │ Candidate Recommendations    │
+               │ user_id -> [item_ids, scores]│
+               └──────────────────────────────┘
+```
+
+### 2.2 Data Model / Schema
+
+**1. `user_recommendations_cache` (Redis - Precomputed Top-K)**
+```
+Key: recs:user:{user_id}
+Value: JSON String [ {"item_id": "m_101", "score": 0.95}, {"item_id": "m_202", "score": 0.91} ]
+TTL: 3600 seconds (1 hour)
+```
+
+**2. `user_vectors` & `item_vectors` (Milvus / FAISS Vector DB or Feature Store)**
+```
+User Embedding Collection: { user_id: INT, vector: FLOAT[128], last_active: TIMESTAMP }
+Item Embedding Collection: { item_id: INT, vector: FLOAT[128], genre: VARCHAR, release_year: INT }
+```
+
+**3. `user_events_stream` (Kafka Event Schema)**
+```json
+{
+  "user_id": "u_999",
+  "item_id": "m_555",
+  "event_type": "watch_complete",
+  "implicit_weight": 1.0,
+  "timestamp": 1722000000
+}
+```
+
+> 🎯 **NFR addressed**: **Serving Latency < 10ms** — Precomputed recommendations stored in Redis cache serve 90% of requests instantly.
+
+---
+
+## Step 3 — API or Interface (~5 min)
+
+### 3.1 Get Personalized Recommendations
+```
+GET /api/v1/recommendations/{user_id}?category=homepage&limit=20
+Response 200 OK:
+{
+  "user_id": "u_999",
   "recommendations": [
     {
-      "item_id": "movie_456",
+      "item_id": "m_101",
       "title": "Interstellar",
-      "score": 0.95,
+      "score": 0.96,
       "reason": "Because you watched Inception"
     }
   ],
-  "generated_at": "2025-07-26T10:00:00Z",
   "ttl_sec": 3600
 }
 ```
 
-### 2. Record User Event (Feedback Signal)
+### 3.2 Ingest User Interaction Event
 ```
 POST /api/v1/events
 {
-  "user_id": "u123",
-  "item_id": "movie_456",
-  "event_type": "watch_complete",   // or "watch_partial", "click", "rating", "skip"
-  "value": 1.0,                     // for rating: 1-5, for watch: fraction completed
-  "timestamp": 1722000000000
+  "user_id": "u_999",
+  "item_id": "m_101",
+  "event_type": "watch_partial",
+  "watch_percentage": 0.75,
+  "timestamp": 1722000000
 }
-→ 202 Accepted (fire and forget)
+Response: 202 Accepted
 ```
 
-### 3. Rate an Item (Explicit Feedback)
+> 🎯 **NFR addressed**: **Scale & Latency** — Interaction ingestion is an asynchronous fire-and-forget API pushing directly to Kafka.
+
+---
+
+## Step 4 — Data Flow (~3 min)
+
+### 4.1 Capacity Estimation
+
+- **Serving RPS**: 200M DAU × 5 requests/day = 1 Billion requests/day = **~11,500 RPS avg**.
+- **Vector DB Size**: 200M users × 128 floats × 4 bytes = **~100 GB RAM** for user vectors. 50K items × 128 floats × 4 bytes = **~25 MB RAM** (tiny catalog vector footprint).
+- **Training Event Throughput**: 200M users × 10 interaction events/day = 2 Billion events/day = **~23,000 events/sec** → Kafka ingestion.
+
+### 4.2 Data Flow Through System
+
 ```
-POST /api/v1/ratings
-{
-  "user_id": "u123",
-  "item_id": "movie_456",
-  "rating": 4.5
-}
-→ 200 OK
+TRAINING & FEATURE PIPELINE (Offline / Asynchronous)
+  User Interaction Events -> Kafka -> Flink Feature Store -> Spark Model Trainer
+    ├─ Matrix Factorization (ALS) / Two-Tower Neural Network
+    └─ Outputs updated User Embeddings & Item Embeddings -> Vector DB / Feature Store
+
+SERVING PIPELINE (Real-Time Retrieval < 100ms)
+  Client Homepage -> GET /recommendations/{user_id}
+    │
+    ├─ 1. Check Redis Cache (`recs:user:{user_id}`)
+    │      ├─ Cache HIT (90%): Return Top-20 immediately (< 10ms)
+    │      └─ Cache MISS: Fallback to Two-Stage Recommendation Engine
+    │
+    ▼ Two-Stage Engine (Fallback / Real-Time Computation)
+  Stage 1: Candidate Retrieval (ANN Search)
+    ├─ Fetch User Embedding vector from Feature Store
+    └─ Perform Approximate Nearest Neighbor (ANN) search via FAISS against 50,000 items -> Retrieve Top 500 candidates (~5ms)
+    │
+  Stage 2: Heavy Re-Ranking & Filtering
+    ├─ Apply ML Ranking model on 500 candidates (incorporate real-time context: device, time)
+    ├─ Filter out already-watched titles (Redis Bloom filter per user)
+    ├─ Apply Maximal Marginal Relevance (MMR) for genre diversity (~50ms)
+    └─ Write Top-20 result to Redis Cache & return to user
+```
+
+> 🎯 **NFR addressed**: **Serving Latency < 100ms** — Two-stage retrieval cuts catalog scoring effort from 50,000 items to 500 candidates in ~5ms.
+
+---
+
+## Step 5 — High-level Design (~10 min)
+
+### 5.1 Architecture Diagram
+
+```
+                                  ┌───────────────────────────┐
+                                  │      Client Web / App     │
+                                  └─────────────┬─────────────┘
+                                                │ GET /recommendations
+                                                ▼
+                                  ┌───────────────────────────┐
+                                  │   Recommendation Service  │
+                                  └──────┬─────────────┬──────┘
+                                         │             │
+                    ┌────────────────────┘             └────────────────────┐
+                    │ Cache Hit (<10ms)                                     │ Cache Miss (<100ms)
+                    ▼                                                       ▼
+      ┌───────────────────────────┐                           ┌───────────────────────────┐
+      │   Redis Precomputed Cache │                           │   Two-Stage Engine        │
+      │   recs:user:{user_id}     │                           │   (FAISS ANN + ML Ranker) │
+      └───────────────────────────┘                           └─────────────┬─────────────┘
+                                                                            │ Read embeddings
+                                                                            ▼
+┌───────────────────────────┐                           ┌───────────────────────────┐
+│   User Interaction Events │                           │   Feature Store / Vector  │
+│   (Clicks, Watch Time)    │                           │   (User & Item Embeddings)│
+└─────────────┬─────────────┘                           └─────────────▲─────────────┘
+              │                                                       │
+              ▼                                                       │ Write embeddings
+┌───────────────────────────┐                           ┌─────────────┴─────────────┐
+│   Kafka Stream & Flink    ├──────────────────────────►│   Spark Offline Trainer   │
+└───────────────────────────┘                           │   (Nightly Two-Tower Model│
+                                                        └───────────────────────────┘
+```
+
+### 5.2 Component Walkthrough
+
+| Component | Role | Why This Choice |
+|---|---|---|
+| **Redis Cache** | Precomputed recommendations store | Sub-10ms response for 90% of user request traffic |
+| **FAISS ANN Index** | Candidate Retrieval (Stage 1) | Retrieves top 500 candidates from 50K catalog in ~5ms |
+| **ML Ranking Model** | Candidate Re-Ranking (Stage 2) | Applies cross-features, context, and diversity penalty |
+| **Two-Tower Neural Net**| Embedding Generation | Generates dual 128-dim vectors (User Tower & Item Tower) |
+| **User History Filter** | Watched content exclusion | Redis Bloom filter prevents recommending already-watched titles |
+
+> 🎯 **NFR addressed**: **Freshness & Availability** — Background hourly batch workers refresh Redis cache so active users rarely hit cache misses.
+
+---
+
+## Step 6 — Deep Dives (~15 min)
+
+### Deep Dive 1: Deep Learning Two-Tower Model Architecture
+
+```
+USER TOWER                                      ITEM TOWER
+User ID, Demographics, Recent Watched          Item ID, Genre, Cast, Metadata
+          │                                               │
+          ▼ (Deep Neural Nets)                            ▼ (Deep Neural Nets)
+User Embedding Vector u [128-dim]              Item Embedding Vector v [128-dim]
+          │                                               │
+          └───────────────────────┬───────────────────────┘
+                                  │ Dot Product (u · v)
+                                  ▼
+                        Predicted Affinity Score
+```
+- **Serving Trick**: Item embeddings ($v$) are pre-computed offline since the catalog (50K) changes infrequently. Only user embedding ($u$) is queried dynamically.
+
+---
+
+### Deep Dive 2: Candidate Retrieval via Approximate Nearest Neighbor (ANN)
+
+**Problem**: Computing vector dot product ($u \cdot v$) against 50,000 items per user request at 11,500 RPS requires 74 Billion operations/sec.
+
+**Solution: FAISS Inverted File Index (IVF)**
+```
+1. Clustering: Partition 50,000 item vectors into 256 cluster centroids via K-Means offline.
+2. Indexing: Assign each item vector to its nearest centroid.
+3. Querying:
+   - Calculate distance from User Vector to 256 centroids.
+   - Select ONLY the top 8 closest clusters.
+   - Search items within those 8 clusters (~1,500 items instead of 50,000).
+   - Result: 30x speedup with 98% recall accuracy!
 ```
 
 ---
 
-## SECTION 5 — Core Recommendation Algorithms
-
-### Algorithm 1: Collaborative Filtering (CF)
-
-**Core idea**: "Users like you also liked this"
-
-**User-Based CF:**
-```
-1. Find users similar to target user (based on rating history)
-2. Recommend items those similar users liked that target hasn't seen
-
-Similarity metric: Cosine similarity between rating vectors
-  sim(u1, u2) = (ratings_u1 · ratings_u2) / (|ratings_u1| × |ratings_u2|)
-
-Problem: 200M users × 200M users similarity matrix → too large!
-```
-
-**Item-Based CF (more scalable):**
-```
-1. Find items similar to items user already likes
-2. Recommend those similar items
-
-Item similarity computed offline (item space: 50K << user space: 200M)
-  sim(item_A, item_B) = cosine similarity of their user rating vectors
-
-At query time:
-  → Look up items user has rated
-  → For each rated item: retrieve top-K similar items
-  → Aggregate scores, return top-N
-```
-
-### Algorithm 2: Matrix Factorization (MF) — The Gold Standard ✅
+### Deep Dive 3: Cold Start Mitigation Strategies
 
 ```
-Factorize the User-Item Rating Matrix into two low-rank matrices:
-  R ≈ P × Q^T
+Problem: New user has 0 watch history -> Vector DB lookup returns zero embedding.
 
-  P: User matrix (200M users × 128 latent factors)
-  Q: Item matrix (50K items × 128 latent factors)
+Multi-Tiered Fallback Strategy:
+1. New User (Zero History):
+   - Tier 1: Survey Onboarding (User picks 3 favorite genres -> Seed initial user embedding).
+   - Tier 2: Demographic CF (Recommend top titles watched by users in same location/age group).
+   - Tier 3: Popularity Fallback ("Top 10 Movies in your Country").
 
-Each user u has a latent vector P[u] (128 dimensions)
-Each item i has a latent vector Q[i] (128 dimensions)
-
-Predicted rating: P[u] · Q[i]^T (dot product)
-
-Training: minimize RMSE on known ratings:
-  min Σ (R[u,i] - P[u] · Q[i])^2 + regularization
-
-Algorithm: ALS (Alternating Least Squares) or SGD (Stochastic Gradient Descent)
-  - Fix Q, solve for P (closed form)
-  - Fix P, solve for Q (closed form)
-  - Alternate until convergence
-
-After training:
-  For user u: top recommendations = items with highest P[u] · Q[i] score
-  But 50K dot products per user is still fast (matrix multiply)
-```
-
-### Algorithm 3: Deep Learning (Two-Tower Model) — Netflix/YouTube's actual approach ✅
-
-```
-Two separate neural networks:
-  User Tower: user_id, user features → 128-dim embedding
-  Item Tower: item_id, item features → 128-dim embedding
-
-Training: maximize dot product for (user, item) pairs they interacted with
-          minimize for (user, random_item) pairs (negative sampling)
-
-At serving time:
-  User embedding: 1 forward pass through User Tower (fast)
-  Item embeddings: pre-computed for all 50K items (updated nightly)
-  Retrieval: Approximate Nearest Neighbor (ANN) search
-    → Given user embedding, find top-100 items with highest cosine similarity
-    → Sub-millisecond using FAISS (Facebook AI Similarity Search)
+2. New Item (Newly added movie with 0 watches):
+   - Content-Based Transfer: Pass movie metadata (genre, cast, description) through Item Tower to generate immediate Item Embedding $v$.
+   - Exploration Slot ($\epsilon$-Greedy): Show new item to 5% of users in position 3 to gather interaction data rapidly.
 ```
 
 ---
 
-## SECTION 6 — High-Level Architecture
+### Deep Dive 4: Genre Diversity via Maximal Marginal Relevance (MMR)
 
-```
-DATA COLLECTION & TRAINING PIPELINE
-════════════════════════════════════════════════════════════════════
+**Problem**: Raw dot-product scoring recommends 20 Sci-Fi space movies if user watched *Interstellar*.
 
- User events (clicks, watches, ratings, skips)
-       │
-       ▼
- Kafka (user_events topic)
-       │
- ┌─────▼───────────────────────────────────────────────────────────┐
- │              Feature Engineering Service                        │
- │  - Compute implicit weights:                                    │
- │    watch_complete = 1.0, watch_partial (50%) = 0.5             │
- │    click = 0.2, skip = -0.1                                     │
- │  - Add item features: genre, year, director, cast               │
- │  - Add user features: age_group, location, device               │
- └─────┬───────────────────────────────────────────────────────────┘
-       │
-       ▼
- Feature Store (Redis + S3)
-   - User features: real-time (Redis, TTL 1 hour)
-   - Item features: batch (S3, updated daily)
-       │
- ┌─────▼───────────────────────────────────────────────────────────┐
- │            Training Pipeline (runs nightly + weekly)            │
- │                                                                 │
- │  Nightly (fast):                                                │
- │    Update user embeddings based on last 24h of events          │
- │    Keep item embeddings fixed (only user side updated)         │
- │                                                                 │
- │  Weekly (full):                                                 │
- │    Full model retrain on last 30 days of data                  │
- │    Update both user and item embeddings                        │
- │    Framework: PyTorch + Spark for distributed training         │
- └─────┬───────────────────────────────────────────────────────────┘
-       │
-       ▼
- Model Store (S3) → Serving Cluster (loaded into memory)
-
-════════════════════════════════════════════════════════════════════
-
-SERVING PIPELINE (Real-time, < 100ms)
-════════════════════════════════════════════════════════════════════
-
- User opens Netflix homepage
-       │
-       ▼ GET /recommendations/{user_id}
-       │
- ┌─────▼──────────────────────────────────────────────────────────┐
- │  Recommendation Service                                         │
- │                                                                 │
- │  1. Check Redis cache:                                          │
- │     recs:{user_id} → precomputed list (cached for 1 hour)      │
- │     Cache HIT (90% of requests): return immediately            │
- │     Cache MISS: generate fresh recommendations                  │
- │                                                                 │
- │  2. Two-stage retrieval + ranking:                              │
- │     STAGE 1 (Candidate Retrieval):                              │
- │       - ANN search: find top-500 items by embedding similarity  │
- │       - (using FAISS index on item embeddings)                  │
- │       - Takes ~5ms                                              │
- │                                                                 │
- │     STAGE 2 (Re-Ranking):                                       │
- │       - Run full ranking model on 500 candidates               │
- │       - Add diversity penalty (not too many same-genre items)   │
- │       - Add business rules: promote new releases, filter watched│
- │       - Takes ~50ms                                             │
- │                                                                 │
- │  3. Cache result in Redis (TTL: 1 hour)                        │
- │  4. Return top-20 recommendations                              │
- └─────────────────────────────────────────────────────────────────┘
-
-════════════════════════════════════════════════════════════════════
-
- BACKGROUND PRECOMPUTATION (every hour, batch)
- ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- For all active users (logged in last 7 days):
-   Run Stage 1 + Stage 2 in batch (Spark on EMR)
-   Store in Redis: recs:{user_id} (TTL 70 min)
- 
- Covers 95% of homepage loads from cache.
-```
+**Solution: MMR Re-Ranking Algorithm**
+$$MR = \arg\max_{i \in R} \left[ \lambda \cdot \text{Sim}_1(\text{User}, i) - (1 - \lambda) \cdot \max_{j \in S} \text{Sim}_2(i, j) \right]$$
+- $\text{Sim}_1$: Relevance score to user.
+- $\text{Sim}_2$: Similarity score between candidate item $i$ and already selected recommendation $j$.
+- $\lambda = 0.7$: Balances high relevance ($70\%$) with genre diversity ($30\%$).
 
 ---
 
-## SECTION 7 — Deep Dives
-
-### Deep Dive 1: Cold Start Problem
-
-**New user (no watch history):**
-```
-Strategy 1: Popularity-based (safe default)
-  → Show top-rated and most-watched content in user's region
-  → "Most popular in India this week"
-  → Simple, works for all new users
-
-Strategy 2: Onboarding survey
-  → Ask user: "Which genres do you like?" (action, comedy, drama)
-  → Map selected genres to seed recommendations
-  → Much better than pure popularity
-
-Strategy 3: Demographic CF
-  → Use user's age, location, language, device
-  → Find users with similar demographics → use their preferences
-  → Better than popularity, no survey needed
-
-Strategy 4: Content-based (item features only, no user history)
-  → After first watch: use features of that item to find similar items
-  → Genre, director, cast, plot keywords
-  → Immediately personalizes after 1 interaction
-```
-
-**New item (just added):**
-```
-Cold start for items:
-  → No user interactions yet → can't appear in CF
-
-Solutions:
-  1. Content-based: use item features (genre, cast) to make similar to existing items
-  2. Item embeddings from metadata: movie description → NLP → embedding
-  3. Manual curation: editors promote new releases to a featured list
-  4. Epsilon-greedy exploration: randomly show new items to 5% of users, learn quickly
-```
-
----
-
-### Deep Dive 2: Candidate Retrieval at Scale (ANN Search)
-
-**Problem**: Given user embedding (128 dim), find top-500 most similar items from 50K.
-
-**Naive approach**: compute dot product with all 50K items
-- 50K × 128 = 6.4 million multiplications
-- For 11,500 requests/sec: 74 billion multiplications/sec — too slow
-
-**Solution: Approximate Nearest Neighbor (ANN)**
-
-**FAISS (Facebook AI Similarity Search):**
-```
-Offline index building:
-  1. All item embeddings (50K × 128) loaded into FAISS
-  2. FAISS builds IVF (Inverted File Index):
-     - Cluster items into 256 centroids (k-means)
-     - Each item assigned to nearest centroid
-     - Query: only search within top-8 closest clusters (not all 256)
-     → Only ~50K/256 × 8 = ~1,560 items to compare (vs 50K)
-     → 30× speedup with ~2% accuracy loss
-
-Online query:
-  1. User embedding → find 8 nearest cluster centroids
-  2. Search items within those clusters (~1,560 items)
-  3. Return top-500 by dot product
-  4. Time: ~1ms (vs 50ms for brute force)
-```
-
----
-
-### Deep Dive 3: Real-Time vs Batch Recommendations
-
-```
-BATCH (nightly recompute):
-  Pros: scalable (Spark), cheapest
-  Cons: stale — doesn't reflect last 1 hour of behavior
-  Use for: base recommendations, weekly digest emails
-
-NEAR-REAL-TIME (hourly refresh):
-  Current architecture: precompute every hour using latest features
-  Pros: reasonably fresh, manageable load
-  Cons: 1-hour lag
-  Use for: homepage recommendations (current design)
-
-REAL-TIME (session-based):
-  User watches a movie right now → what to recommend immediately?
-  Solution: Session-aware recommendations
-    - Take base recommendations (batch)
-    - Re-rank using current session actions (what user clicked/watched today)
-    - Session context: Redis store of last 10 actions (TTL: 1 hour)
-    - Re-ranking: fast (no retraining) — just boost items similar to session actions
-
-Hybrid (Netflix's actual approach):
-  Base recommendations: batch (weekly)
-  User context updates: near-real-time (hourly embedding update)
-  Session boost: real-time (re-rank in < 50ms using session actions)
-```
-
----
-
-### Deep Dive 4: Diversity in Recommendations
-
-**Problem**: Matrix factorization might recommend 10 sci-fi movies to a sci-fi fan — boring, no exploration.
-
-**Diversity techniques:**
-
-**Maximal Marginal Relevance (MMR):**
-```
-After scoring 500 candidates:
-  - Penalize candidates too similar to already-selected items
-  - score_adjusted = λ × relevance - (1-λ) × max_similarity_to_selected
-
-  λ = 0.8: mostly relevance (Netflix default)
-  λ = 0.5: 50-50 relevance/diversity (exploration mode)
-
-Result: no 2 consecutive recommendations from same genre
-```
-
-**Slot-based templates:**
-```
-Homepage slots:
-  Row 1: "Top picks for you" (pure relevance)
-  Row 2: "Because you watched [X]" (item-based CF, similar to X)
-  Row 3: "New releases" (trending + business rule)
-  Row 4: "Family movies" (demographic-based, if family account)
-
-Different algorithm per row → natural diversity
-```
-
----
-
-### Deep Dive 5: Measuring Recommendation Quality
-
-```
-Offline metrics (during training):
-  RMSE (Root Mean Square Error): prediction accuracy on held-out ratings
-  Recall@K: fraction of future-liked items in top-K recommendations
-  NDCG@K: Normalized Discounted Cumulative Gain (quality of ranking order)
-
-Online metrics (A/B test in production):
-  Click-Through Rate (CTR): fraction of recs that get clicked
-  Watch Time per session: did recs lead to longer engagement?
-  Conversion: did rec lead to subscription renewal?
-
-The key insight (Netflix's research):
-  RMSE improved 10% on rating prediction → no measurable change in online watch time
-  Direct online metrics (CTR, watch time) matter more than offline metrics
-```
-
----
-
-## SECTION 8 — Trade-offs & Alternatives
-
-### CAP Theorem Position
-**AP (Availability + Partition Tolerance)**
-- Slightly stale recommendations (1-hour old) are perfectly acceptable
-- Better to serve cached recommendations than fail the homepage
-- Recommendation quality degrades gracefully — never hard fails
-
-### Key Trade-offs Table
+### Trade-offs & Alternatives
 
 | Decision | Choice | Alternative | Reasoning |
 |---|---|---|---|
-| Algorithm | Two-Tower DL model | Matrix Factorization (ALS) | Two-Tower handles complex features (text, images, session); ALS is simpler and still very effective |
-| Candidate retrieval | FAISS ANN | Brute-force dot product | FAISS: 30× faster with 2% accuracy loss; brute force infeasible at 11,500 rps |
-| Freshness | Hourly batch refresh | Real-time user embedding | Real-time is complex; hourly is a practical balance for homepage |
-| Cold start | Demographic CF + survey | Popularity only | Demographic gives better personalization; popularity is a fallback |
-| Diversity | MMR re-ranking | Pure score ranking | Pure score gives repetitive genre recs; MMR improves engagement and retention |
+| **Candidate Search**| FAISS ANN Index | Brute-force Dot Product | FAISS gives 30x speedup with negligible (2%) accuracy loss |
+| **Serving Model** | Two-Stage (Retrieve + Rank) | Single-stage Deep Net | Single heavy model on 50K catalog violates < 100ms latency SLA |
+| **Architecture** | Precomputed Redis Cache | 100% Real-Time Scoring | Precomputing homepage recs reduces cluster compute cost by 90% |
 
 ---
 
-## Interview Flow Summary (Talk Track)
+### Summary Talk Track
 
-1. "A recommendation system has three phases: **data collection → model training → serving**"
-2. "Core algorithm: **Two-Tower model** — user embedding + item embedding; score = dot product"
-3. "Serving is a **two-stage pipeline**: candidate retrieval (FAISS ANN, ~500 candidates) + ranking (full model, top-20)"
-4. "**Precomputed in batch** (hourly for active users) → cached in Redis → homepage loads in < 5ms"
-5. "**Cold start**: new users get popularity-based + demographic CF; new items get content-based features"
-6. "**Diversity**: Maximal Marginal Relevance (MMR) re-ranks to avoid genre monotony"
-7. "**Measure online**: CTR and watch time matter more than offline RMSE"
+1. "We design a scalable recommendation system using a **Two-Stage Architecture**: **Candidate Retrieval** followed by **Heavy Re-Ranking**."
+2. "Stage 1 uses a **Two-Tower Neural Network** with **FAISS ANN Indexing** to reduce 50,000 items to 500 candidates in **~5ms**."
+3. "Stage 2 applies **Maximal Marginal Relevance (MMR)** to prevent genre monotony and filters watched titles via **Redis Bloom Filters**."
+4. "To meet sub-10ms SLAs at 11,500 RPS, we **precompute homepage recommendations in Redis**, covering 90% of requests with cache hits."
 
 ---
 

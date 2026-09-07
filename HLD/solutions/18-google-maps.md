@@ -5,510 +5,307 @@
 
 ---
 
-## SECTION 1 — Clarifying Questions (Ask These FIRST in Interview)
+## Step 1 — Requirements (~5 min)
 
-**Functional Scope:**
+### 1.1 Clarifying Questions (Ask These FIRST)
 - Search for places (restaurants, hospitals, addresses)?
-- Turn-by-turn navigation (routing)?
-- Real-time traffic?
-- Map tile rendering (the visual map)?
-- ETA calculation?
-- Street View? (out of scope)
-- Ride-hailing integration?
+- Turn-by-turn navigation (routing) and ETA calculation?
+- Real-time traffic integration?
+- Map tile rendering (visual map display)?
+- Street View / indoor mapping?
+- Scale: how many DAU and navigation sessions?
 
-**Scale:**
-- How many users per day?
-- How many navigation requests per day?
-- Size of the road network?
+**Typical Interviewer Answer:** Core scope is place search, routing with real-time traffic, ETA calculation, and map tile display. 1 Billion DAU, 20M navigation sessions/day. No Street View.
 
-**Typical Interviewer Answer:**
-- Search, routing with real-time traffic, ETA, map tile display
-- 1 billion DAU (Google Maps actual scale)
-- 20 million navigation requests per day
-- Road network: 60 million road segments worldwide
-- No Street View for this discussion
+### 1.2 Functional Requirements (FR)
+1. Users can search for places / POIs by name or category.
+2. Get directions from location A to location B (driving, walking, transit).
+3. Step-by-step turn-by-turn navigation.
+4. Real-time ETA estimation accounting for traffic delays.
+5. Render map tiles at different zoom levels (0–20).
+6. Traffic layer overlay showing congestion levels.
 
----
-
-## SECTION 2 — Functional & Non-Functional Requirements
-
-### Functional Requirements
-1. Users can search for places (addresses, POIs like restaurants, hospitals)
-2. Get directions from A to B (driving, transit, walking)
-3. Step-by-step turn-by-turn navigation
-4. ETA calculation factoring real-time traffic
-5. View the map (rendered tiles at different zoom levels)
-6. Traffic layer overlay (congestion indicators)
-
-### Non-Functional Requirements
+### 1.3 Non-Functional Requirements (NFR)
 | Property | Target |
 |---|---|
-| **Routing** | Route computed in < 2 seconds, even across continents |
-| **ETA accuracy** | Within ± 2 minutes for typical journey |
-| **Map tiles** | < 200ms to load map tiles |
-| **Availability** | 99.99% |
-| **Scale** | 1 billion DAU, 20M navigation sessions/day |
+| **Routing Latency** | Route computed in < 2 seconds globally |
+| **ETA Accuracy** | Within ± 2 minutes for typical urban journeys |
+| **Tile Load Time** | < 200ms to fetch map tiles from CDN |
+| **Availability** | 99.99% for map rendering and routing |
+| **Scale** | 1B DAU, 20M navigation sessions/day, 20M location updates/sec |
 
-### Out of Scope
-- Street View
-- Indoor mapping
-- Google Business profile management
-- Real-time transit schedules (mention as data source)
-
----
-
-## SECTION 3 — Capacity Estimation
-
-### Navigation Sessions
-- 20M navigation requests/day
-- = 20M / 86,400 ≈ **~230 routing requests/sec** average
-- Peak (rush hour 8–9am): **~1,000 routing requests/sec**
-
-### Location Updates (From Users Providing Traffic Data)
-- 1 billion DAU × 30% sharing location while driving = 300M active navigators
-- Each sends location every 15 seconds
-- = 300M / 15 = **~20 million location events/sec** — Kafka essential
-
-### Map Tiles
-- World map at zoom level 20: ~4.4 trillion tiles
-- Typically cache zoom levels 0–15 (world to street level): ~100 billion tiles
-- Each tile: ~10–50 KB PNG/WebP image
-- Top tiles (popular cities): heavily CDN-cached
-
-### Road Network Storage
-- 60 million road segments
-- Each segment: ~200 bytes (from_node, to_node, length, speed_limit, road_type)
-- Total graph: 60M × 200B = **~12 GB** — fits in RAM on a single server!
+### 1.4 Out of Scope
+- Street View / 3D imagery rendering
+- Indoor navigation / airport mapping
+- Google Business Profile management
 
 ---
 
-## SECTION 4 — API Design
+## Step 2 — Core Entities (~3 min)
 
-### 1. Get Directions
+### 2.1 Entity Identification
+
 ```
-GET /api/v1/directions?
-  origin=12.9716,77.5946&
-  destination=12.9350,77.6140&
-  mode=driving&
-  departure_time=now&
-  alternatives=2
+┌──────────────────┐       ┌──────────────────────────┐       ┌──────────────────┐
+│   Node           │       │  Road Segment (Edge)     │       │   Traffic Data   │
+│   (Intersection) │       │                          │       │   (Real-time)    │
+│                  │       │  segment_id              │       │                  │
+│  node_id         │◄─────►│  from_node_id            │◄─────►│  segment_id      │
+│  lat, lng        │       │  to_node_id              │       │  current_speed   │
+│  geohash         │       │  distance_m              │       │  congestion_lvl  │
+└──────────────────┘       │  speed_limit             │       └──────────────────┘
+                           └──────────────────────────┘
+┌──────────────────┐       ┌──────────────────────────┐
+│   Place / POI    │       │  Map Tile                │
+│                  │       │                          │
+│  place_id        │       │  zoom, x, y              │
+│  name, category  │       │  s3_key                  │
+│  lat, lng        │       └──────────────────────────┘
+└──────────────────┘
+```
 
-Response:
+### 2.2 Data Model / Schema
+
+**1. `nodes` & `road_segments` (Graph Data - In-Memory RAM)**
+```sql
+-- Intersections
+nodes (node_id BIGINT PK, lat DOUBLE, lng DOUBLE, geohash VARCHAR(12));
+
+-- Directed edges
+road_segments (
+  segment_id BIGINT PK, from_node_id BIGINT, to_node_id BIGINT,
+  distance_m INT, speed_limit_kmh INT, road_type ENUM('motorway','primary','secondary','residential'),
+  is_one_way BOOLEAN
+);
+```
+*Note*: Whole graph is loaded into **Routing Server RAM (~12 GB total)**.
+
+**2. `traffic_segments` (Redis Key-Value)**
+```
+Key: traffic:{segment_id}
+Value: { "current_speed_kmh": 15, "congestion": "heavy", "updated_at": 1722000000 }
+TTL: 60 seconds
+```
+
+**3. `places` (Elasticsearch with geo_point)**
+```json
+{
+  "place_id": "pl_101",
+  "name": "Starbucks Coffee",
+  "category": "cafe",
+  "location": { "lat": 12.975, "lon": 77.598 },
+  "rating": 4.5
+}
+```
+
+> 🎯 **NFR addressed**: **Routing Latency < 2s** — Graph in RAM avoids disk IO. **Tile Load < 200ms** — Tiles stored as flat files in S3 and cached via CDN.
+
+---
+
+## Step 3 — API or Interface (~5 min)
+
+### 3.1 Get Directions (Routing)
+```
+GET /api/v1/directions?origin=12.9716,77.5946&destination=12.9350,77.6140&mode=driving&departure_time=now
+Response 200 OK:
 {
   "routes": [
     {
-      "route_id": "r1",
-      "summary": "Via MG Road",
+      "route_id": "r_101",
       "distance_meters": 8240,
-      "duration_sec": 1680,            // with current traffic
+      "duration_sec": 1200,            // traffic adjusted
       "duration_no_traffic_sec": 900,
-      "legs": [
-        {
-          "start": { "lat": 12.97, "lng": 77.59 },
-          "end": { "lat": 12.93, "lng": 77.61 },
-          "steps": [
-            { "instruction": "Head north on MG Road", "distance_m": 500, "duration_sec": 120 }
-          ]
-        }
-      ],
-      "polyline": "encoded_path_string"   // compressed lat/lng sequence
+      "polyline": "encoded_string...",
+      "steps": [ { "instruction": "Turn left on MG Road", "distance_m": 500 } ]
     }
   ]
 }
 ```
 
-### 2. Get Map Tiles
+### 3.2 Get Map Tile
 ```
 GET /api/v1/tiles/{zoom}/{x}/{y}
-→ Returns PNG/WebP tile image
-→ Served via CDN (99% cache hit for popular zoom/coordinates)
+→ Returns PNG / WebP image or Vector Tile PBF protocol buffer (served via CDN)
 ```
 
-### 3. Search Places
+### 3.3 Place Search
 ```
-GET /api/v1/places/search?q=Starbucks&lat=12.97&lng=77.59&radius=2000
-Response: {
-  "places": [
-    {
-      "place_id": "pl_abc",
-      "name": "Starbucks - MG Road",
-      "address": "42, MG Road, Bangalore",
-      "location": { "lat": 12.975, "lng": 77.598 },
-      "category": "cafe",
-      "rating": 4.2,
-      "distance_m": 450
-    }
-  ]
-}
+GET /api/v1/places/search?q=coffee&lat=12.9716&lng=77.5946&radius_m=2000
+Response 200 OK:
+{ "places": [ { "place_id": "pl_101", "name": "Starbucks", "distance_m": 450 } ] }
 ```
 
-### 4. Report Traffic (from user's device)
+### 3.4 Telemetry (Location updates from active users)
 ```
 POST /api/v1/telemetry
-{
-  "lat": 12.975, "lng": 77.598,
-  "speed_kmh": 5,
-  "heading": 45,
-  "road_segment_id": "seg_xyz",
-  "timestamp": 1722000000000
-}
-→ 200 OK (fire and forget)
+{ "lat": 12.975, "lng": 77.598, "speed_kmh": 12, "heading": 90, "timestamp": 1722000000 }
+```
+
+> 🎯 **NFR addressed**: **Scale** — Telemetry API is lightweight fire-and-forget; GET tiles served 99% by CDN.
+
+---
+
+## Step 4 — Data Flow (~3 min)
+
+### 4.1 Capacity Estimation
+
+- **Navigation Sessions**: 20M requests/day = **~230 req/sec** avg, peak **~1,000 req/sec**.
+- **Telemetry Ingestion**: 300M driving users send GPS every 15s = **~20 Million events/sec** → Kafka ingestion required.
+- **Road Network Graph**: 60M road segments × 200B = **12 GB RAM** (fits easily in RAM of single routing cluster node).
+- **Map Tile Storage**: ~100 Billion tiles (Zoom 0–15) × 30 KB = **~3 PB in S3**.
+
+### 4.2 Data Flow Through System
+
+**Navigation & Real-time Route Calculation Flow:**
+```
+User App → GET /directions → API Gateway → Routing Service
+  1. Routing Service retrieves user location & destination coordinates.
+  2. Map matching converts lat/lng to nearest Graph Nodes (Source, Target).
+  3. Routing Engine runs Contraction Hierarchies (CH) algorithm on in-memory graph.
+  4. Segment edge weights are updated dynamically using real-time speed from Redis Traffic Store.
+  5. Route polyline and turn instructions returned to user device in < 100ms.
+```
+
+**Traffic Aggregation Pipeline:**
+```
+User GPS → Telemetry Ingestion → Kafka (20M events/sec) → Flink Aggregator 
+  → Map matching to segment_id → Compute avg speed per segment every 2 min 
+  → Store in Redis Traffic Cache → Routing Servers refresh weights every 2 min.
+```
+
+> 🎯 **NFR addressed**: **ETA Accuracy** — 2-minute Flink window ensures real-time traffic condition updates.
+
+---
+
+## Step 5 — High-level Design (~10 min)
+
+### 5.1 Architecture Diagram
+
+```
+                                 ┌─────────────────────────────────┐
+                                 │       CDN (CloudFront/Akamai)   │
+                                 │   Cache Map Tiles (Zoom 0-15)   │
+                                 └────────────────┬────────────────┘
+                                                  │ Cache miss
+USER DEVICE                                       ▼
+  │  GET /tiles ───────────────────────────► S3 Tile Bucket
+  │
+  ├─ GET /directions ──────────────────────► API Gateway
+  │                                               │
+  │                                      ┌────────▼────────────────┐
+  │                                      │  Routing Service        │
+  │                                      │  - In-Memory Road Graph │
+  │                                      │  - Contraction Hierarchy│
+  │                                      └────────┬────────┬───────┘
+  │                                               │        │
+  │                                      ┌────────▼──┐ ┌───▼───────┐
+  │                                      │  Redis    │ │  Geo-     │
+  │                                      │ Traffic   │ │  Coder    │
+  │                                      └───────────┘ └───────────┘
+  │
+  ├─ GET /places/search ───────────────────► Place Search Service
+  │                                               │
+  │                                               ▼
+  │                                         Elasticsearch
+  │
+  └─ POST /telemetry ──────────────────────► Telemetry Ingestion (UDP/HTTP)
+                                                  │
+                                                  ▼
+                                            Kafka Stream
+                                                  │
+                                                  ▼
+                                            Apache Flink
+                                            (Avg Speed / 2 min)
+                                                  │
+                                                  ▼
+                                            Redis Traffic Store
+```
+
+### 5.2 Component Walkthrough
+
+| Component | Role | Why This Choice |
+|---|---|---|
+| **CDN** | Serves static map tiles | 99% hit rate; < 50ms latency globally |
+| **Routing Service** | Computes shortest path & ETA | Contraction Hierarchies in RAM; < 100ms execution |
+| **Redis Traffic Store** | Stores live segment speeds | Low latency read access for graph weight updates |
+| **Kafka & Flink** | Processes 20M GPS events/sec | Scalable stream processing and sliding-window aggregation |
+| **Elasticsearch** | POI Place Search | Geo-distance filtering + fuzzy text matching |
+
+> 🎯 **NFR addressed**: **Availability 99.99%** — Statistically decoupled reading (tiles on CDN, routing in RAM) from telemetry ingestion.
+
+---
+
+## Step 6 — Deep Dives (~15 min)
+
+### Deep Dive 1: Graph Routing Algorithm — Contraction Hierarchies (CH)
+
+**Problem**: Dijkstra's algorithm ($O((V+E) \log V)$) on 60M nodes takes 5+ seconds. A* search is better but still slow across long distances.
+
+**Solution: Contraction Hierarchies (CH)**
+```
+Phase 1: Preprocessing (Offline, run once or daily)
+  1. Rank nodes by importance (highways > main roads > local streets).
+  2. "Contract" low-importance nodes: add "shortcut" edges if shortest path between 
+     uncontracted neighbors passed through the contracted node.
+  3. Result: Graph augmented with shortcut edges connecting major highways directly.
+
+Phase 2: Query Time (Online, execution < 10ms)
+  1. Bidirectional Dijkstra search.
+  2. Forward search from Source ONLY moves UP the hierarchy (local -> highway).
+  3. Backward search from Target ONLY moves UP the hierarchy (local -> highway).
+  4. Both searches meet at a top-tier highway node.
+  5. Unpack shortcuts to produce full turn-by-turn route.
 ```
 
 ---
 
-## SECTION 5 — Data Model
+### Deep Dive 2: Map Tile Management — Raster vs Vector Tiles
 
-### Road Network Graph (Core Data Structure)
 ```
-nodes (intersections):
-  node_id     BIGINT       PRIMARY KEY
-  lat         DOUBLE
-  lng         DOUBLE
-  geohash     VARCHAR(12)
+Option A: Raster Tiles (PNG/WebP)
+  - Server renders 256x256 pixel images for every (zoom, x, y).
+  - Zoom 20 requires ~4.4 Trillion tiles (storage bottleneck).
+  - Client cannot rotate or tilt smooth 3D view.
 
-road_segments (edges):
-  segment_id    BIGINT       PRIMARY KEY
-  from_node_id  BIGINT       REFERENCES nodes
-  to_node_id    BIGINT       REFERENCES nodes
-  distance_m    INT
-  speed_limit_kmh INT
-  road_type     ENUM('motorway', 'primary', 'secondary', 'residential')
-  is_one_way    BOOLEAN
-  max_weight_t  FLOAT        NULL  (for trucks)
-  toll          BOOLEAN
-
-traffic_segments (real-time):
-  segment_id    BIGINT       PRIMARY KEY (same as road_segments)
-  current_speed_kmh INT      -- updated every 2 minutes from telemetry
-  congestion    ENUM('free_flow', 'moderate', 'heavy', 'standstill')
-  updated_at    TIMESTAMP
-```
-**DB for road network**: **In-memory (RAM)** on routing servers. 12 GB fits easily.
-**DB for traffic**: **Redis** (fast updates, 60-second TTL per segment)
-
-### Places / POI Data
-```
-places:
-  place_id      VARCHAR(40)  PRIMARY KEY
-  name          VARCHAR(200)
-  address       TEXT
-  lat           DOUBLE
-  lng           DOUBLE
-  category      VARCHAR(50)
-  rating        FLOAT
-  phone         VARCHAR(20)
-  hours         JSONB
-```
-**DB**: **Elasticsearch** with geo_point field (same as food delivery search)
-
-### Map Tile Storage
-```
-Tiles stored in S3:
-  s3://google-maps-tiles/{zoom}/{x}/{y}.webp
-  
-  Naming: TMS (Tile Map Service) standard
-  Served via CDN with very long TTL (tiles rarely change)
-  When road changes (new highway built): invalidate specific tile range in CDN
+Option B: Vector Tiles (Mapbox / Google Maps modern approach) ✅
+  - Server sends raw geometric vectors (polygons, lines, labels) in Protobuf format.
+  - Client GPU renders tile styling natively using WebGL/Metal.
+  - Payload size is 80% smaller than PNG.
+  - Dynamic rotation, night-mode styling, and 3D buildings handled client-side without re-downloading.
 ```
 
 ---
 
-## SECTION 6 — High-Level Architecture
+### Deep Dive 3: ETA Estimation using Machine Learning
 
 ```
-USER DEVICE
-    │
-    ├─ GET /tiles/{z}/{x}/{y}  ────────────────► CDN (CloudFront/Akamai)
-    │                                              │ Cache Hit (99%): serve tile
-    │                                              │ Cache Miss (1%): S3 → render → cache
-    │
-    ├─ GET /directions ──────────────────────────► Routing Service
-    │                                              │ Loads road graph in RAM
-    │                                              │ Applies real-time traffic weights
-    │                                              │ Runs routing algorithm
-    │                                              ▼
-    │                                         Return route
-    │
-    ├─ GET /places/search ───────────────────────► Place Search Service
-    │                                              │ Elasticsearch geo query
-    │                                              ▼
-    │                                         Return POIs
-    │
-    └─ POST /telemetry ──────────────────────────► Telemetry Ingestion Service
-                                                    │ (UDP / lightweight HTTP)
-                                                    ▼
-                                               Kafka (location stream)
-                                                    │
-                                          ┌─────────▼─────────────┐
-                                          │  Traffic Aggregation  │
-                                          │  Service (Flink)      │
-                                          │  - Groups events by   │
-                                          │    road segment       │
-                                          │  - Computes avg speed │
-                                          │    per segment        │
-                                          │  - Every 2 minutes    │
-                                          └─────────┬─────────────┘
-                                                    │
-                                          ┌─────────▼─────────────┐
-                                          │  Traffic Redis Store  │
-                                          │  segment_id → speed   │
-                                          │  TTL: 60 seconds      │
-                                          └─────────┬─────────────┘
-                                                    │
-                                          ┌─────────▼─────────────┐
-                                          │  Routing Servers      │
-                                          │  Load traffic from    │
-                                          │  Redis every 2 min    │
-                                          │  Apply to graph edges │
-                                          └───────────────────────┘
+ETA Calculation Formula:
+  ETA = Route Distance / Current Segment Speeds + Junction Delays + Signal Cycles + ML Residual
 
-MAP TILE RENDERING PIPELINE
-═════════════════════════════════
-  OpenStreetMap data + proprietary updates
-       ↓
-  Tile Rendering Workers (Mapnik / PostGIS)
-       ↓ (generate tiles for each zoom level 0–20)
-  S3 (tile storage)
-       ↓
-  CDN pre-warming (popular cities first)
-       ↓
-  Served to users
+Graph Neural Networks (GNN):
+  - Google DeepMind trained GNNs on road network super-segments.
+  - Features: historical traffic patterns (time of day, day of week), weather, spatial neighborhood traffic.
+  - Result: Reduced ETA prediction errors by 40% compared to pure static segment speed summation.
 ```
 
 ---
 
-## SECTION 7 — Deep Dives
-
-### Deep Dive 1: Routing Algorithm — Getting from A to B
-
-**The road network is a weighted directed graph:**
-```
-Nodes = intersections
-Edges = road segments
-Edge weight = travel_time = distance / current_speed
-```
-
-**Algorithms:**
-
-**Dijkstra's Algorithm (baseline):**
-```
-Find shortest path from source to all nodes.
-Time complexity: O((V + E) log V) with priority queue
-For world graph: 60M nodes, 150M edges → too slow for 2-second target
-```
-
-**A* Search (heuristic-guided):**
-```
-Like Dijkstra but uses heuristic h(n) = straight-line distance to destination
-Only explores nodes that seem "closer" to destination
-Faster than Dijkstra for point-to-point routing
-Still too slow for cross-continent routes
-```
-
-**Contraction Hierarchies (CH) — What Google/Uber actually use** ✅
-
-```
-Key insight: Most routing queries go through the same "important" nodes
-(highways, motorways, city centers)
-
-Preprocessing (offline, run once):
-  1. Rank all nodes by "importance" (how often they're on shortest paths)
-  2. Add shortcut edges: if A→B→C is always the fastest path, add edge A→C
-  3. Remove less important nodes (they become implicit)
-  4. Result: a hierarchy of nodes from "local roads" to "motorways"
-
-Runtime query (extremely fast):
-  1. From source: traverse UP the hierarchy (local roads → highways)
-  2. From destination: traverse DOWN the hierarchy (highways → local roads)
-  3. They meet somewhere in the middle at a "high importance" node
-  4. Combine paths: O(1) to O(log N) hops typically
-
-Result: 60M node graph → route computed in milliseconds!
-Real-world: Google routes from Mumbai to Delhi in < 100ms using CH
-```
-
-**OSRM (Open Source Routing Machine)** uses CH and can route across Europe in 0.5ms.
-
----
-
-### Deep Dive 2: Real-Time Traffic Integration
-
-```
-Data sources for real-time traffic:
-  1. Anonymized speed data from Google Maps app users
-  2. Waze (acquired 2013) user reports
-  3. Municipal traffic sensor APIs
-  4. Historical patterns (ML: "Monday 8am on MG Road is usually 10 km/h")
-
-Pipeline:
-  User locations → Kafka (20M events/sec)
-       ↓
-  Flink stream processing:
-    - Match GPS point to nearest road segment (map matching)
-    - Filter noise (users walking, indoors)
-    - Aggregate speeds per segment per 2-minute window
-    - Detect sudden slowdowns (accident) vs gradual buildup (rush hour)
-       ↓
-  Redis: segment_id → { avg_speed, confidence, updated_at }
-       ↓
-  Routing servers load traffic every 2 minutes
-  Blend with historical patterns (if traffic data sparse)
-
-Traffic-aware edge weight:
-  travel_time = segment_distance / min(current_speed, speed_limit)
-  
-For routing: multiply baseline weight by traffic multiplier:
-  free_flow: 1.0×
-  moderate: 1.5×
-  heavy: 2.5×
-  standstill: 10× (virtually block the road)
-```
-
----
-
-### Deep Dive 3: Map Tile Rendering
-
-**How does a map become tiles?**
-
-```
-Source data:
-  - OpenStreetMap: roads, buildings, parks, water bodies (open dataset)
-  - Google proprietary: business data, satellite imagery, Street View
-  - Stored in PostGIS (PostgreSQL with geospatial extensions)
-
-Tile rendering (offline, pre-generated):
-  For each zoom level (0–20) and each tile coordinate (x, y):
-    1. PostGIS spatial query: get all features within tile's bounding box
-    2. Style them (road color, width, label, building shade)
-    3. Render to PNG/WebP image
-    4. Store in S3: s3://tiles/{zoom}/{x}/{y}.webp
-
-  Zoom 0: 1 tile (whole world, ~512×512px)
-  Zoom 10: 1M tiles (country level)
-  Zoom 15: 1B tiles (neighborhood level)
-  Zoom 20: 1T tiles (building level) — only pre-generate for cities
-
-Updates:
-  New road opened → only regenerate affected tiles
-  Tile bounding box calculation → regenerate ~50 tiles at all zoom levels
-  CDN invalidation: purge {zoom}/{x}/{y} for changed tiles
-```
-
-**Vector Tiles (modern approach):**
-```
-Instead of pre-rendered PNGs, send vector data:
-  { roads: [{ geometry, road_type, name }], buildings: [...] }
-Client renders using WebGL (MapboxGL, Google Maps JS SDK)
-
-Advantages:
-  - Smaller payloads (20% of PNG size)
-  - Client can rotate/tilt map without server (3D view)
-  - Style changes without re-downloading tiles
-  - Much smaller CDN storage
-
-This is why modern Google Maps and Uber use vector tiles
-```
-
----
-
-### Deep Dive 4: Place Search (Geocoding + POI Search)
-
-**Forward Geocoding:** "MG Road Bangalore" → lat/lng
-**Reverse Geocoding:** lat/lng → "42 MG Road, Bangalore 560001"
-**POI Search:** "restaurants near me" → list of places
-
-**Architecture:**
-```
-Geocoding:
-  - Offline: build an index mapping address tokens to lat/lng
-  - Input: "MG Road Bangalore" → tokenize → ["MG", "Road", "Bangalore"]
-  - Lookup: Elasticsearch fuzzy match on address text + geo proximity boost
-  - Return best match
-
-Elasticsearch index for places:
-  {
-    name: "Starbucks", category: "cafe",
-    address: "42 MG Road", 
-    location: { "lat": 12.975, "lon": 77.598 }  // geo_point
-  }
-
-Search query: "coffee near Bangalore" within 5km:
-  text match: "coffee" ← hits name/category
-  geo filter: within 5km of (12.97, 77.59)
-  scoring: combined text relevance + distance + rating
-```
-
----
-
-### Deep Dive 5: ETA Estimation
-
-ETA is more complex than routing duration — it must account for:
-
-```
-ETA = Route duration (with current traffic)
-    + Expected traffic delay (will traffic worsen during the trip?)
-    + Stop light wait time (signal cycle analysis)
-    + Turn delay (left turns at highway take longer than right turns)
-    + Driver behaviour factor (aggressive vs conservative)
-
-ML-based ETA:
-  Input features:
-    - Current route distance + intermediate segment speeds
-    - Historical travel time for same route (day + hour of week)
-    - Current traffic index (worse than historical?)
-    - Weather (rain → 20% slower)
-    - Events nearby (stadium event ending → traffic spike)
-    - Start time (rush hour departure vs non-peak)
-
-  Google's DeepMind team trained a GNN (Graph Neural Network) on:
-    - Billions of historical trips
-    - Road graph structure
-    - Real-time traffic
-    → Reduced ETA prediction error by 40% vs pure algorithmic approach
-
-  Output: P50 ETA (median), P90 ETA (90th percentile — "usually within this time")
-```
-
----
-
-## SECTION 8 — Trade-offs & Alternatives
-
-### CAP Theorem Position
-**AP for routing and map tiles:**
-- Slightly stale traffic data (5-min old): acceptable
-- Better to show navigation with 10% inaccurate traffic than error out
-- If routing server is down: show cached routes, flag as potentially outdated
-
-**CP for nothing specific in this system** — this is fundamentally an AP system.
-
-### Key Trade-offs Table
+### Trade-offs & Alternatives
 
 | Decision | Choice | Alternative | Reasoning |
 |---|---|---|---|
-| Routing algorithm | Contraction Hierarchies | Pure Dijkstra / A* | CH gives millisecond routing for world graph; Dijkstra is too slow (seconds) |
-| Map tiles | Pre-rendered (offline) + CDN | On-the-fly rendering | Pre-rendered: consistent quality, CDN-cacheable; on-the-fly: always fresh but slow and expensive |
-| Tile format | Vector tiles (WebGL) | Raster PNG | Vector is smaller, client-rendered, supports 3D/tilt; raster is simpler but larger and not 3D |
-| Traffic data | Crowdsourced (user phones) | Road sensors | Sensors are expensive and sparse; crowdsourcing covers every road with active users |
-| ETA | ML model (GNN) | Pure routing formula | GNN reduces error by 40%; formula doesn't account for behavioral patterns |
-
-### What Would You Do Differently at Larger Scale?
-- **Predictive routing**: route that's fastest in 20 minutes (traffic will build up on highway X)
-- **Multi-modal routing**: driving + transit + last-mile walking combined
-- **Offline maps**: download region tiles + road graph for offline navigation
-- **Indoor mapping**: airport terminals, malls (different graph, GPS doesn't work)
+| **Routing Algo** | Contraction Hierarchies | Dijkstra / A* | CH enables < 10ms cross-country queries via pre-calculated shortcuts |
+| **Map Display** | Vector Tiles | Pre-rendered PNG | Vector tiles save 80% bandwidth and support client-side rotation/3D |
+| **Traffic DB** | Redis | PostgreSQL | Redis handles high-frequency (2-min TTL) overwrite of 60M segment speeds |
 
 ---
 
-## Interview Flow Summary (Talk Track)
+### Summary Talk Track
 
-1. "Google Maps has 3 systems: **map rendering (tiles)**, **routing (algorithm)**, and **real-time traffic (pipeline)**"
-2. "Map tiles: pre-rendered offline → S3 → CDN (99% cache hit). Modern: vector tiles + WebGL for 3D"
-3. "Routing: **Contraction Hierarchies** — offline preprocess builds shortcuts, runtime routes in milliseconds"
-4. "Traffic: 20M location events/sec from user phones → Kafka → Flink aggregates avg speed per segment every 2 min → Redis"
-5. "Traffic applied to CH graph edge weights: free_flow = 1×, standstill = 10× multiplier"
-6. "ETA: not just routing duration — **ML model (GNN)** trained on billions of historical trips for 40% better accuracy"
-7. "Place search: **Elasticsearch** with geo_point — combined text + proximity ranking"
+1. "Google Maps requires solving three primary problems: **tile rendering**, **graph routing**, and **real-time traffic processing**."
+2. "For routing across 60M road segments, standard Dijkstra is too slow. We use **Contraction Hierarchies (CH)** to preprocess shortcut edges between major highways, reducing query latency to **< 10ms**."
+3. "Real-time traffic ingests **20M GPS events/sec** via Kafka and Apache Flink, updating segment speeds in **Redis** every 2 minutes."
+4. "Map tiles are served using **Vector Tiles** cached at the CDN level for **< 200ms** latency."
 
 ---
 

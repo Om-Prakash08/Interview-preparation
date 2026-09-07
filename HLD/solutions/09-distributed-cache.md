@@ -5,7 +5,9 @@
 
 ---
 
-## SECTION 1 — Clarifying Questions (Ask These FIRST in Interview)
+## Step 1 — Requirements (~5 min)
+
+### 1.1 Clarifying Questions (Ask These FIRST)
 
 **Functional Scope:**
 - Is this a general-purpose key-value cache, or specialized (session store, rate limiter, leaderboard)?
@@ -30,18 +32,14 @@
 - Sub-millisecond reads (<1ms)
 - Read-heavy: 10:1 read-to-write ratio
 
----
-
-## SECTION 2 — Functional & Non-Functional Requirements
-
-### Functional Requirements
+### 1.2 Functional Requirements (FR)
 1. `GET key` — retrieve value by key (returns null if not found or expired)
 2. `PUT key value [ttl]` — store key-value pair with optional TTL
 3. `DELETE key` — remove a key
 4. When cache is full: automatically evict least-recently-used keys
 5. Automatic expiry of keys past their TTL
 
-### Non-Functional Requirements
+### 1.3 Non-Functional Requirements (NFR)
 | Property | Target |
 |---|---|
 | **Read Latency** | < 1ms (in-memory access) |
@@ -50,7 +48,7 @@
 | **Scalability** | Horizontal scaling to handle petabytes of data across nodes |
 | **Consistency** | Single-node writes consistent; replicas eventually consistent |
 
-### Out of Scope
+### 1.4 Out of Scope
 - Persistence (AOF/RDB snapshots) — mention as extension
 - Pub/Sub messaging
 - Lua scripting
@@ -58,60 +56,25 @@
 
 ---
 
-## SECTION 3 — Capacity Estimation
+## Step 2 — Core Entities (~3 min)
 
-### Scale
-- 100 billion items cached across the fleet
-- Average key-value pair: 100 bytes (key: 20 bytes, value: 80 bytes)
-- Total data: 100B × 100 bytes = **10 TB of data**
-- 10 TB / 128 GB RAM per server = **~80 cache nodes**
-
-### QPS
-- 500,000 reads/sec + 50,000 writes/sec = **550,000 ops/sec**
-- Single Redis node handles ~100,000 ops/sec
-- Minimum nodes (write capacity): 550K / 100K = **~6 nodes**
-- But we need 80 nodes for data, so data sizing dominates
-
-### Latency
-- In-memory access: ~0.1ms
-- Network round trip: ~0.5ms
-- Total: **< 1ms** ✅
-
----
-
-## SECTION 4 — API Design
-
-### Client-Facing API
+### 2.1 Entity Identification
 
 ```
-// GET: retrieve a value
-GET(key: string) → value: bytes | null
-
-// PUT: store a value (with optional TTL in seconds)
-PUT(key: string, value: bytes, ttl: int?) → OK
-
-// DELETE: remove a key
-DELETE(key: string) → OK | NOT_FOUND
-
-// EXISTS: check if key exists
-EXISTS(key: string) → bool
+┌──────────────────┐      ┌──────────────────┐      ┌──────────────────┐
+│  CacheEntry      │      │  CacheNode       │      │  ClusterConfig   │
+│                  │      │  (server)        │      │                  │
+│  key             │      │  node_id         │      │  node_membership │
+│  value           │      │  shard_range     │      │  shard_mapping   │
+│  expiry_time     │      │  role (primary/  │      │  ring_positions  │
+│  access_time     │      │    replica)      │      │  (ZooKeeper)     │
+│  dll_node_ptr    │      │  replica_of      │      │                  │
+└──────────────────┘      └──────────────────┘      └──────────────────┘
 ```
 
-### Internal Node Communication (for replication)
-```
-// Primary → Replica replication commands (internal, binary protocol)
-REPLICATE(key, value, ttl, timestamp)  // sent after every write
-REPLICATE_DELETE(key, timestamp)
+**Primary entities**: `CacheEntry` (key-value + metadata), `CacheNode` (server instance with hash table + LRU list), `ClusterConfig` (consistent hashing ring managed by ZooKeeper).
 
-// Heartbeat between nodes
-PING → PONG
-```
-
----
-
-## SECTION 5 — Core Components & Data Structures
-
-### Internal Data Structure per Node
+### 2.2 Internal Data Structure per Node
 
 **Hash Table + Doubly Linked List (LRU Cache)**
 
@@ -153,9 +116,89 @@ Hash Table              Doubly Linked List (MRU → LRU)
 "cart:9" → ptr
 ```
 
+> 🎯 **NFR addressed**: **Read Latency < 1ms** — O(1) hash table lookup + in-memory storage. **Scalability** — each node stores a shard; add more nodes for more capacity. **Availability** — primary-replica replication with automatic failover.
+
 ---
 
-## SECTION 6 — High-Level Architecture
+## Step 3 — API or Interface (~5 min)
+
+### 3.1 Client-Facing API
+```
+// GET: retrieve a value
+GET(key: string) → value: bytes | null
+
+// PUT: store a value (with optional TTL in seconds)
+PUT(key: string, value: bytes, ttl: int?) → OK
+
+// DELETE: remove a key
+DELETE(key: string) → OK | NOT_FOUND
+
+// EXISTS: check if key exists
+EXISTS(key: string) → bool
+```
+
+### 3.2 Internal Node Communication (for replication)
+```
+// Primary → Replica replication commands (internal, binary protocol)
+REPLICATE(key, value, ttl, timestamp)  // sent after every write
+REPLICATE_DELETE(key, timestamp)
+
+// Heartbeat between nodes
+PING → PONG
+```
+
+> 🎯 **NFR addressed**: **Write Latency < 5ms** — simple PUT with async replication; no synchronous consensus needed. **Consistency** — single-node writes are immediately consistent; replicas converge asynchronously.
+
+---
+
+## Step 4 — Data Flow (~3 min)
+
+### 4.1 Capacity Estimation (Back-of-Envelope)
+
+**Scale:**
+- 100 billion items cached across the fleet
+- Average key-value pair: 100 bytes (key: 20 bytes, value: 80 bytes)
+- Total data: 100B × 100 bytes = **10 TB of data**
+- 10 TB / 128 GB RAM per server = **~80 cache nodes**
+
+**QPS:**
+- 500,000 reads/sec + 50,000 writes/sec = **550,000 ops/sec**
+- Single Redis node handles ~100,000 ops/sec
+- Minimum nodes (write capacity): 550K / 100K = **~6 nodes**
+- But we need 80 nodes for data, so data sizing dominates
+
+**Latency:**
+- In-memory access: ~0.1ms
+- Network round trip: ~0.5ms
+- Total: **< 1ms** ✅
+
+### 4.2 Data Flow Through System
+
+**Read Path:**
+```
+Client App → Cache Client Library
+  → Consistent hash(key) → determine target node (Node 2)
+  → GET key → Node 2 (Primary)
+  → Hit? → Return value (<1ms)
+  → Miss? → Return null → App fetches from DB, PUT into cache
+```
+
+**Write Path:**
+```
+Client App → Cache Client Library
+  → Consistent hash(key) → Node 2 (Primary)
+  → PUT key value ttl → Node 2 stores in hash table + LRU list
+  → Async: Node 2 → REPLICATE to Replica 2a
+  → Return OK to client
+```
+
+> 🎯 **NFR addressed**: **Scalability** — consistent hashing distributes keys evenly; data sizing drives node count. **Read Latency** — hash + network = sub-1ms. **Availability** — async replication doesn't block writes.
+
+---
+
+## Step 5 — High-level Design (~10 min)
+
+### 5.1 Architecture Diagram
 
 ```
          CLIENT APPLICATIONS
@@ -195,9 +238,20 @@ Hash Table              Doubly Linked List (MRU → LRU)
      └──────────────────────────────────────────────────────┘
 ```
 
+### 5.2 Component Walkthrough
+
+| Component | Role | Why This Choice |
+|---|---|---|
+| **Cache Client Library** | Routes requests to correct node via consistent hashing | Client-side routing = no extra network hop; library embedded in app |
+| **Cache Nodes (Primary)** | Store key-value data in hash table + LRU list | Each node handles ~100K ops/sec; data sharded across nodes |
+| **Replica Nodes** | Hot standby; async replication from primary | Automatic failover on primary crash; can serve reads for extra throughput |
+| **ZooKeeper** | Cluster coordination, leader election, membership | Proven coordination system; detects node failures via heartbeats |
+
+> 🎯 **NFR addressed**: **Availability 99.99%** — replica auto-promotion on primary failure; ZooKeeper detects failures in seconds. **Read Latency < 1ms** — in-memory on every node; client-side routing avoids proxy hop. **Scalability** — add nodes, re-hash a fraction of keys (consistent hashing). **Consistency** — single-writer per shard; replicas eventually consistent.
+
 ---
 
-## SECTION 7 — Deep Dives
+## Step 6 — Deep Dives (~15 min)
 
 ### Deep Dive 1: Consistent Hashing (How to distribute keys across nodes)
 
@@ -340,15 +394,15 @@ SETNX "lock:trending_products" "1" EX 5
 
 ---
 
-## SECTION 8 — Trade-offs & Alternatives
+### Trade-offs & Alternatives
 
-### CAP Theorem Position
+**CAP Theorem Position:**
 **AP (Availability + Partition Tolerance)**
 - Cache exists to improve performance, not to be the source of truth
 - Stale data from a replica is far better than a failed cache read
 - During partition: nodes serve possibly stale data (acceptable for a cache)
 
-### Key Trade-offs Table
+**Key Trade-offs Table:**
 
 | Decision | Choice | Alternative | Reasoning |
 |---|---|---|---|
@@ -358,22 +412,23 @@ SETNX "lock:trending_products" "1" EX 5
 | Expiry | Lazy deletion + background sampling | Eager scanning | Lazy is O(1); eager scanning (TTL sorted set) adds overhead but is more precise |
 | Stampede | Stale-While-Revalidate | Mutex | Mutex adds latency under high load; stale-while-revalidate is zero-latency |
 
-### What Would You Do Differently at Larger Scale?
+**What Would You Do Differently at Larger Scale?**
 - **Multi-tier caching**: L1 local in-process cache (< 1μs) → L2 distributed Redis cache (< 1ms) → L3 DB (tens of ms)
 - **Geo-distributed caches**: separate Redis clusters per region (US, EU, Asia) to avoid cross-regional latency
 - **Cache warming**: on deployment or cold start, preload popular keys from DB before serving traffic
 
 ---
 
-## Interview Flow Summary (Talk Track)
+### Summary Talk Track
 
-1. "A distributed cache has three core problems: **how to store**, **how to distribute**, and **how to replicate**"
-2. "Each node uses a **Hash Table + Doubly Linked List** for O(1) LRU get/put/evict"
-3. "Distribution via **Consistent Hashing** — adding/removing nodes only remaps ~1/N keys"
-4. "Replication: **Primary-Replica** with ZooKeeper for leader election and failover"
-5. "Eviction: **Approximate LRU** (sample 5 random keys, evict oldest) — Redis's actual approach"
-6. "Cache stampede: **Stale-While-Revalidate** — serve stale, async regenerate, no spike"
-7. "CAP: AP — cache staleness is acceptable; cache unavailability is not"
+1. "A distributed cache has three core problems: **how to store**, **how to distribute**, and **how to replicate**."
+2. "Core entities: **CacheEntry** (key+value+TTL), **CacheNode** (hash table + LRU list), **ClusterConfig** (consistent hashing ring)."
+3. "Each node uses a **Hash Table + Doubly Linked List** for O(1) LRU get/put/evict."
+4. "Distribution via **Consistent Hashing** — adding/removing nodes only remaps ~1/N keys."
+5. "Replication: **Primary-Replica** with ZooKeeper for leader election and failover."
+6. "Eviction: **Approximate LRU** (sample 5 random keys, evict oldest) — Redis's actual approach."
+7. "Cache stampede: **Stale-While-Revalidate** — serve stale, async regenerate, no spike."
+8. "CAP: **AP** — cache staleness is acceptable; cache unavailability is not."
 
 ---
 

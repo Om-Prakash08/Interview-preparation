@@ -5,7 +5,9 @@
 
 ---
 
-## SECTION 1 — Clarifying Questions (Ask These FIRST in Interview)
+## Step 1 — Requirements (~5 min)
+
+### 1.1 Clarifying Questions (Ask These FIRST)
 
 **Functional Scope:**
 - Upload and stream videos — both?
@@ -28,11 +30,7 @@
 - Adaptive bitrate streaming: yes
 - Comments and likes: basic support
 
----
-
-## SECTION 2 — Functional & Non-Functional Requirements
-
-### Functional Requirements
+### 1.2 Functional Requirements (FR)
 1. Users can upload videos (up to 10 GB, various formats)
 2. Videos are transcoded into multiple resolutions (360p, 720p, 1080p, 4K)
 3. Users can stream videos with adaptive bitrate (ABR)
@@ -40,7 +38,7 @@
 5. Subscribe to channels
 6. View count tracking
 
-### Non-Functional Requirements
+### 1.3 Non-Functional Requirements (NFR)
 | Property | Target |
 |---|---|
 | **Upload reliability** | Resumable uploads — no restart on network failure |
@@ -49,7 +47,7 @@
 | **Scalability** | Handle 1B hours watched/day; 500 hrs uploaded/min |
 | **Storage durability** | 99.999999999% (11 nines) — video must never be lost |
 
-### Out of Scope (for MVP)
+### 1.4 Out of Scope (for MVP)
 - Live streaming
 - Recommendations
 - Monetization / ads
@@ -57,31 +55,91 @@
 
 ---
 
-## SECTION 3 — Capacity Estimation
+## Step 2 — Core Entities (~3 min)
 
-### Upload Volume
-- 500 hours of video/minute = 30,000 hours/hour = **720,000 hours/day**
-- Average video: 300 MB (compressed, 10 min at 1080p)
-- Raw upload: 720,000 hr × 60 min/hr × 300 MB / 10 min = **1.3 PB/day raw uploads**
+### 2.1 Entity Identification
 
-### Transcoding
-- Each video transcoded into 5 formats (360p, 480p, 720p, 1080p, 4K)
-- Storage per video: ~1 GB (all formats combined)
-- Storage per day: 720,000 hr × 6 × ~50 MB (avg across all formats) = **~216 TB/day**
+```
+┌──────────────┐        ┌──────────────┐        ┌──────────────┐
+│   Video      │        │ VideoFormat  │        │   Comment    │
+│              │        │ (transcoded) │        │              │
+│ video_id     │───────►│ video_id     │        │ comment_id   │
+│ channel_id   │        │ resolution   │        │ video_id     │
+│ title        │        │ cdn_url      │        │ user_id      │
+│ description  │        │ file_size    │        │ text         │
+│ status       │        │ status       │        │ created_at   │
+│ view_count   │        └──────────────┘        └──────────────┘
+│ s3_raw_path  │
+└──────────────┘        ┌──────────────┐
+                        │   Channel    │
+                        │              │
+                        │ channel_id   │
+                        │ user_id      │
+                        │ subscriber_  │
+                        │   count      │
+                        └──────────────┘
+```
 
-### Streaming / Reads
-- 1 billion hours watched/day = ~11.5 million hours/second
-- Average bitrate: 1 Mbps (720p)
-- Bandwidth: 11.5M × 1 Mbps = **~11.5 TB/s** — this is why CDN is non-negotiable
+**Primary entities**: `Video` (metadata + state), `VideoFormat` (per-resolution transcoded output), `Comment` (UGC), `Channel` (creator profile).
 
-### View Counts
-- 1 billion views/day ≈ 11,500 view events/second
+### 2.2 Data Model / Schema
+
+**Table 1: `videos`**
+```
+video_id        BIGINT       PRIMARY KEY (Snowflake)
+channel_id      BIGINT       NOT NULL
+title           VARCHAR(200)
+description     TEXT
+status          ENUM('uploading', 'processing', 'ready', 'failed')
+duration_sec    INT
+view_count      BIGINT       DEFAULT 0
+like_count      BIGINT       DEFAULT 0
+s3_raw_path     TEXT         // original uploaded file
+created_at      TIMESTAMP
+```
+**DB Choice**: PostgreSQL (relational metadata, moderate write volume)
+
+**Table 2: `video_formats` (transcoded versions)**
+```
+video_id        BIGINT
+resolution      ENUM('360p', '480p', '720p', '1080p', '4K')
+cdn_url         TEXT         // CDN URL for HLS segments
+file_size_bytes BIGINT
+status          ENUM('processing', 'ready', 'failed')
+PRIMARY KEY (video_id, resolution)
+```
+
+**Table 3: `comments`**
+```
+comment_id      BIGINT       PRIMARY KEY
+video_id        BIGINT
+user_id         BIGINT
+text            TEXT
+created_at      TIMESTAMP
+like_count      BIGINT
+```
+**DB Choice**: Cassandra (partition by `video_id`, cluster by `comment_id DESC`)
+- High write/read volume per video
+- No complex joins needed
+
+**Table 4: `view_events` (analytics)**
+```
+Not stored in OLTP DB.
+Published to Kafka → aggregated by Flink/Spark → stored in ClickHouse
+```
+
+**Blob Storage (Videos):**
+- Raw uploads: **Amazon S3** (object storage, 11 nines durability)
+- CDN (streaming): **CloudFront / Akamai** caches HLS segments close to users
+- Naming convention: `s3://youtube-videos/{video_id}/{resolution}/segment_{n}.ts`
+
+> 🎯 **NFR addressed**: **Storage durability 11 nines** — S3 for raw and transcoded videos. **Scalability** — polyglot persistence: Postgres for metadata, Cassandra for high-volume comments, Kafka+ClickHouse for view analytics.
 
 ---
 
-## SECTION 4 — API Design
+## Step 3 — API or Interface (~5 min)
 
-### 1. Initiate Upload (Resumable)
+### 3.1 Initiate Upload (Resumable)
 ```
 POST /api/v1/videos/upload/init
 Authorization: Bearer <token>
@@ -102,7 +160,7 @@ Response 200:
 }
 ```
 
-### 2. Upload Chunk
+### 3.2 Upload Chunk
 ```
 PUT /api/v1/videos/upload/{upload_id}/chunk
 Content-Range: bytes 0-5242879/2147483648
@@ -114,7 +172,7 @@ Response 200: { "bytes_received": 5242880 }
 Response 308 Resume Incomplete: { "bytes_received": 0, "next_byte": 0 }
 ```
 
-### 3. Stream Video
+### 3.3 Stream Video
 ```
 GET /api/v1/videos/{video_id}/manifest.m3u8
 → Returns HLS manifest file listing available quality segments
@@ -123,75 +181,78 @@ GET /api/v1/videos/{video_id}/segments/720p/segment_001.ts
 → Returns individual 10-second video segment (served by CDN)
 ```
 
-### 4. Get Video Metadata
+### 3.4 Get Video Metadata
 ```
 GET /api/v1/videos/{video_id}
 Response: { "video_id", "title", "description", "duration", "views", "likes", "channel", ... }
 ```
 
-### 5. Like / Comment
+### 3.5 Like / Comment
 ```
 POST /api/v1/videos/{video_id}/like
 POST /api/v1/videos/{video_id}/comments
   Body: { "text": "Great video!" }
 ```
 
----
-
-## SECTION 5 — Data Model & Database Choice
-
-### Table 1: `videos`
-```
-video_id        BIGINT       PRIMARY KEY (Snowflake)
-channel_id      BIGINT       NOT NULL
-title           VARCHAR(200)
-description     TEXT
-status          ENUM('uploading', 'processing', 'ready', 'failed')
-duration_sec    INT
-view_count      BIGINT       DEFAULT 0
-like_count      BIGINT       DEFAULT 0
-s3_raw_path     TEXT         // original uploaded file
-created_at      TIMESTAMP
-```
-**DB Choice**: PostgreSQL (relational metadata, moderate write volume)
-
-### Table 2: `video_formats` (transcoded versions)
-```
-video_id        BIGINT
-resolution      ENUM('360p', '480p', '720p', '1080p', '4K')
-cdn_url         TEXT         // CDN URL for HLS segments
-file_size_bytes BIGINT
-status          ENUM('processing', 'ready', 'failed')
-PRIMARY KEY (video_id, resolution)
-```
-
-### Table 3: `comments`
-```
-comment_id      BIGINT       PRIMARY KEY
-video_id        BIGINT
-user_id         BIGINT
-text            TEXT
-created_at      TIMESTAMP
-like_count      BIGINT
-```
-**DB Choice**: Cassandra (partition by `video_id`, cluster by `comment_id DESC`)
-- High write/read volume per video
-- No complex joins needed
-
-### Table 4: `view_events` (analytics)
-```
-Not stored in OLTP DB.
-Published to Kafka → aggregated by Flink/Spark → stored in ClickHouse
-```
-
-### Blob Storage (Videos)
-- Raw uploads: **Amazon S3** (object storage, 11 nines durability)
-- CDN (streaming): **CloudFront / Akamai** caches HLS segments close to users
-- Naming convention: `s3://youtube-videos/{video_id}/{resolution}/segment_{n}.ts`
+> 🎯 **NFR addressed**: **Upload reliability** — chunked resumable uploads prevent full restarts on network failure. **Streaming latency** — HLS segments served from CDN for sub-2-second start.
 
 ---
 
-## SECTION 6 — High-Level Architecture
+## Step 4 — Data Flow (~3 min)
+
+### 4.1 Capacity Estimation (Back-of-Envelope)
+
+**Upload Volume:**
+- 500 hours of video/minute = 30,000 hours/hour = **720,000 hours/day**
+- Average video: 300 MB (compressed, 10 min at 1080p)
+- Raw upload: 720,000 hr × 60 min/hr × 300 MB / 10 min = **1.3 PB/day raw uploads**
+
+**Transcoding:**
+- Each video transcoded into 5 formats (360p, 480p, 720p, 1080p, 4K)
+- Storage per video: ~1 GB (all formats combined)
+- Storage per day: 720,000 hr × 6 × ~50 MB (avg across all formats) = **~216 TB/day**
+
+**Streaming / Reads:**
+- 1 billion hours watched/day = ~11.5 million hours/second
+- Average bitrate: 1 Mbps (720p)
+- Bandwidth: 11.5M × 1 Mbps = **~11.5 TB/s** — this is why CDN is non-negotiable
+
+**View Counts:**
+- 1 billion views/day ≈ 11,500 view events/second
+
+### 4.2 Data Flow Through System
+
+**Upload Pipeline:**
+```
+Creator → Upload Service (chunked) → S3 (raw)
+  → Kafka: VideoUploadedEvent
+  → Transcoding Workers (FFmpeg)
+  → HLS segments → S3 (segments)
+  → Metadata DB updated: status = 'ready'
+  → CDN pre-warms popular videos
+```
+
+**Streaming Pipeline:**
+```
+Viewer → CDN (CloudFront)
+  → Hit? → Serve segment directly (<5ms)
+  → Miss → S3 (origin) → CDN caches it → serve
+```
+
+**View Count Pipeline:**
+```
+View event → API → Kafka → Flink (aggregate per video, 60s windows)
+  → Redis (fast counter, INCRBY)
+  → Periodic flush to PostgreSQL
+```
+
+> 🎯 **NFR addressed**: **Scalability** — 11.5 TB/s bandwidth demands CDN distribution. **Streaming latency** — CDN cache hits deliver < 5ms. **Upload reliability** — chunked upload + S3 multipart.
+
+---
+
+## Step 5 — High-level Design (~10 min)
+
+### 5.1 Architecture Diagram
 
 ```
 UPLOAD PIPELINE
@@ -272,9 +333,23 @@ FULL SYSTEM DIAGRAM
                      └────────────────────────────────────────┘
 ```
 
+### 5.2 Component Walkthrough
+
+| Component | Role | Why This Choice |
+|---|---|---|
+| **Upload Service** | Handles chunked resumable uploads to S3 | Stateless; multipart upload support for large files |
+| **Transcoding Farm** | Converts raw video → HLS segments at multiple resolutions | Horizontally scalable stateless workers; parallel per-segment transcoding |
+| **S3** | Stores raw uploads + transcoded segments | 11 nines durability; cost-effective at PB scale |
+| **CDN (CloudFront)** | Serves video segments to viewers globally | Non-negotiable at 11.5 TB/s; edge caching for < 5ms delivery |
+| **PostgreSQL** | Video metadata (title, status, counts) | ACID for metadata integrity; moderate write volume |
+| **Kafka + Flink** | View count aggregation pipeline | Decouples analytics from serving path; handles 11.5K events/sec |
+| **Redis** | Fast in-memory view counter | INCRBY for real-time approximate counts; periodically flushed to Postgres |
+
+> 🎯 **NFR addressed**: **Availability 99.99%** — CDN serves from edge even if origin is temporarily slow. **Streaming latency < 2s** — CDN cache hits + HLS buffering. **Upload reliability** — resumable upload protocol survives network drops. **Storage durability** — S3 with 11 nines.
+
 ---
 
-## SECTION 7 — Deep Dives
+## Step 6 — Deep Dives (~15 min)
 
 ### Deep Dive 1: Video Upload — Resumable Chunked Upload
 
@@ -377,14 +452,14 @@ This gives **approximate real-time counts** without overwhelming PostgreSQL.
 
 ---
 
-## SECTION 8 — Trade-offs & Alternatives
+### Trade-offs & Alternatives
 
-### CAP Theorem Position
+**CAP Theorem Position:**
 - Video streaming: **AP** — better to serve slightly stale metadata than fail the stream
 - View counts: **Eventual consistency** — exact count within 5 minutes is fine
 - Upload pipeline: **CP** — must confirm chunk receipt before discarding
 
-### Key Trade-offs Table
+**Key Trade-offs Table:**
 
 | Decision | Choice | Alternative | Reasoning |
 |---|---|---|---|
@@ -394,7 +469,7 @@ This gives **approximate real-time counts** without overwhelming PostgreSQL.
 | Video storage | S3 | Self-managed distributed FS | S3 provides 11 nines durability; self-managed is expensive to operate |
 | Manifest caching | CDN cached | Generated on-the-fly | Pre-generated and cached manifests are faster; on-the-fly adds latency |
 
-### What Would You Do Differently at Larger Scale?
+**What Would You Do Differently at Larger Scale?**
 - **Thumbnail generation** as part of the transcoding pipeline (extract frames at regular intervals)
 - **DRM (Digital Rights Management)** for paid content — encrypt segments, license server for decryption keys
 - **A/B testing** different transcoding settings to optimize quality vs file size
@@ -402,15 +477,15 @@ This gives **approximate real-time counts** without overwhelming PostgreSQL.
 
 ---
 
-## Interview Flow Summary (Talk Track)
+### Summary Talk Track
 
-1. "YouTube has two fundamentally different problems: **the upload pipeline** and **the streaming pipeline**"
-2. "For uploads: chunked resumable upload → S3 → async transcoding pipeline → multiple resolutions"
-3. "For streaming: HLS protocol with 10-second segments, adaptive bitrate, served via CDN"
-4. "The transcoding farm is a horizontally scalable worker pool — stateless workers pulling from a queue"
-5. "CDN is absolutely critical — we cannot serve 11.5 TB/s from a single origin"
-6. "View counts use an eventually-consistent counter: Kafka → Redis → periodic flush to DB"
-7. "The key trade-off: we accept eventual consistency on view counts and metadata for massive write throughput"
+1. "YouTube has two fundamentally different problems: **the upload pipeline** and **the streaming pipeline**."
+2. "Core entities: **Video**, **VideoFormat** (per-resolution), **Comment**, **Channel**."
+3. "For uploads: chunked resumable upload → S3 → async transcoding pipeline → multiple resolutions."
+4. "For streaming: **HLS protocol** with 10-second segments, **adaptive bitrate**, served via **CDN**."
+5. "The transcoding farm is a horizontally scalable worker pool — stateless workers pulling from a queue."
+6. "**CDN is absolutely critical** — we cannot serve 11.5 TB/s from a single origin."
+7. "View counts use an eventually-consistent counter: Kafka → Redis → periodic flush to DB."
 
 ---
 

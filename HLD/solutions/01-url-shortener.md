@@ -5,7 +5,9 @@
 
 ---
 
-## SECTION 1 — Clarifying Questions (Ask These FIRST in Interview)
+## Step 1 — Requirements (~5 min)
+
+### 1.1 Clarifying Questions (Ask These FIRST)
 
 > Always spend the first 3–5 minutes asking these before drawing anything.
 > It shows structured thinking and avoids wasted effort.
@@ -29,18 +31,14 @@
 - No user accounts needed for MVP
 - Analytics: basic click count is enough
 
----
-
-## SECTION 2 — Functional & Non-Functional Requirements
-
-### Functional Requirements
+### 1.2 Functional Requirements (FR)
 1. Given a long URL, generate a unique short URL (e.g., `tinyurl.com/abc123`)
 2. Redirect users from short URL → original long URL
 3. Short URL should be optionally customizable
 4. Short URLs expire after a configurable TTL
 5. Basic click analytics (total clicks per URL)
 
-### Non-Functional Requirements
+### 1.3 Non-Functional Requirements (NFR)
 | Property | Target |
 |---|---|
 | **Availability** | 99.99% (4 nines) — redirect must never fail |
@@ -49,45 +47,71 @@
 | **Scalability** | Handles 10B+ redirects/day without degradation |
 | **Security** | No URL enumeration (can't guess other users' URLs) |
 
-### Out of Scope (say this explicitly in interview)
+### 1.4 Out of Scope
 - Payment, user authentication
 - Link previews / social cards
 - Bulk URL import
 
 ---
 
-## SECTION 3 — Capacity Estimation (Back-of-Envelope)
+## Step 2 — Core Entities (~3 min)
 
-> Interviewers LOVE this section. Walk through it out loud, step by step.
+### 2.1 Entity Identification
 
-### Writes (URL creation)
-- 100 million URLs/day
-- = 100M / 86,400 sec ≈ **~1,160 writes/sec (QPS)**
+```
+┌──────────────┐        ┌──────────────┐        ┌──────────────┐
+│   URL        │        │  ClickEvent  │        │   User       │
+│              │        │              │        │  (future)    │
+│ short_code   │───────►│ short_code   │        │              │
+│ long_url     │        │ timestamp    │        │ user_id      │
+│ expires_at   │        │ user_agent   │        │ created_at   │
+│ click_count  │        │ ip           │        │              │
+│ created_at   │        │              │        │              │
+└──────────────┘        └──────────────┘        └──────────────┘
+```
 
-### Reads (redirects)
-- 10 billion redirects/day (100:1 ratio)
-- = 10B / 86,400 ≈ **~115,000 reads/sec (QPS)**
+**Primary entity**: `URL` — maps a short code to a long URL. The access pattern is purely key-value: `short_code → long_url`.
 
-### Storage
-- Each URL record: ~500 bytes (long URL ~400B + metadata ~100B)
-- Per day: 100M × 500B = **50 GB/day**
-- Per year: 50GB × 365 = **~18 TB/year**
-- Over 5 years: **~90 TB total**
+### 2.2 Data Model / Schema
 
-### Short URL Length
-- We need enough unique IDs for 100M/day × 365 × 5 = **~182 billion URLs**
-- Base62 charset: [a-z A-Z 0-9] = 62 characters
-- 62^7 = **3.5 trillion** → 7 characters is enough ✅
+**Core Table: `urls`**
+```
+urls
+─────────────────────────────────────────────
+short_code   VARCHAR(8)   PRIMARY KEY
+long_url     TEXT         NOT NULL
+created_at   TIMESTAMP    DEFAULT NOW()
+expires_at   TIMESTAMP
+click_count  BIGINT       DEFAULT 0
+user_id      BIGINT       NULL  (future)
+```
 
-### Bandwidth
-- Reads: 115,000 req/s × 500B ≈ **55 MB/s** outbound
-- Manageable, no special bandwidth concern.
+### 2.3 Database Choice: **NoSQL (Cassandra or DynamoDB)**
+
+**Why not MySQL/PostgreSQL?**
+- 115,000 reads/sec is too high for a single relational DB node
+- We don't need JOINs — data access is purely key-value: `short_code → long_url`
+- Horizontal scaling is hard with relational DBs
+
+**Why Cassandra / DynamoDB?**
+- Designed for key-value lookup at massive scale
+- Horizontal sharding built-in
+- High availability with replication
+- `short_code` is a perfect partition key (distributed, unique)
+
+**Sharding Key:** `short_code` — ensures even distribution across nodes.
+
+**Indexing:** `short_code` is the primary key. No secondary indexes needed for the core path.
+
+**For Analytics:** Use a separate **time-series DB** (e.g., ClickHouse or BigQuery) or stream click events to Kafka → analytics pipeline. Don't write to main DB on every click (would destroy performance at 115K rps).
+
+> 🎯 **NFR addressed**: **Durability** — Cassandra replication factor 3 ensures URLs are never lost. **Scalability** — NoSQL horizontal sharding handles 10B+ reads/day. **Security** — Base62 random codes prevent URL enumeration.
 
 ---
 
-## SECTION 4 — API Design
+## Step 3 — API or Interface (~5 min)
 
-### 1. Create Short URL
+### 3.1 Create Short URL
 ```
 POST /api/v1/urls
 Content-Type: application/json
@@ -107,7 +131,7 @@ Response 201 Created:
 }
 ```
 
-### 2. Redirect
+### 3.2 Redirect
 ```
 GET /{short_code}
 → HTTP 301 or 302 Redirect to long_url
@@ -117,56 +141,78 @@ GET /{short_code}
 > - **302 (Temporary)**: Browser always hits server. Analytics works perfectly. Slightly higher load.
 > - **Recommendation**: Use **302** if analytics matters. Use **301** for pure performance.
 
-### 3. Delete URL (optional)
+### 3.3 Delete URL (optional)
 ```
 DELETE /api/v1/urls/{short_code}
 → 204 No Content
 ```
 
-### 4. Get Analytics
+### 3.4 Get Analytics
 ```
 GET /api/v1/urls/{short_code}/stats
 → { "short_code": "abc1234", "total_clicks": 5820, "created_at": "..." }
 ```
 
----
-
-## SECTION 5 — Data Model & Database Choice
-
-### Core Table: `urls`
-```
-urls
-─────────────────────────────────────────────
-short_code   VARCHAR(8)   PRIMARY KEY
-long_url     TEXT         NOT NULL
-created_at   TIMESTAMP    DEFAULT NOW()
-expires_at   TIMESTAMP
-click_count  BIGINT       DEFAULT 0
-user_id      BIGINT       NULL  (future)
-```
-
-### Database Choice: **NoSQL (Cassandra or DynamoDB)**
-
-**Why not MySQL/PostgreSQL?**
-- 115,000 reads/sec is too high for a single relational DB node
-- We don't need JOINs — data access is purely key-value: `short_code → long_url`
-- Horizontal scaling is hard with relational DBs
-
-**Why Cassandra / DynamoDB?**
-- Designed for key-value lookup at massive scale
-- Horizontal sharding built-in
-- High availability with replication
-- `short_code` is a perfect partition key (distributed, unique)
-
-**Sharding Key:** `short_code` — ensures even distribution across nodes.
-
-**Indexing:** `short_code` is the primary key. No secondary indexes needed for the core path.
-
-**For Analytics:** Use a separate **time-series DB** (e.g., ClickHouse or BigQuery) or stream click events to Kafka → analytics pipeline. Don't write to main DB on every click (would destroy performance at 115K rps).
+> 🎯 **NFR addressed**: **Latency** — simple GET redirect with no body parsing keeps response < 10ms. **Security** — no API exposes the ability to enumerate short codes.
 
 ---
 
-## SECTION 6 — High-Level Architecture
+## Step 4 — Data Flow (~3 min)
+
+### 4.1 Capacity Estimation (Back-of-Envelope)
+
+> Interviewers LOVE this section. Walk through it out loud, step by step.
+
+**Writes (URL creation):**
+- 100 million URLs/day
+- = 100M / 86,400 sec ≈ **~1,160 writes/sec (QPS)**
+
+**Reads (redirects):**
+- 10 billion redirects/day (100:1 ratio)
+- = 10B / 86,400 ≈ **~115,000 reads/sec (QPS)**
+
+**Storage:**
+- Each URL record: ~500 bytes (long URL ~400B + metadata ~100B)
+- Per day: 100M × 500B = **50 GB/day**
+- Per year: 50GB × 365 = **~18 TB/year**
+- Over 5 years: **~90 TB total**
+
+**Short URL Length:**
+- We need enough unique IDs for 100M/day × 365 × 5 = **~182 billion URLs**
+- Base62 charset: [a-z A-Z 0-9] = 62 characters
+- 62^7 = **3.5 trillion** → 7 characters is enough ✅
+
+**Bandwidth:**
+- Reads: 115,000 req/s × 500B ≈ **55 MB/s** outbound
+- Manageable, no special bandwidth concern.
+
+### 4.2 Data Flow Through System
+
+**Write Path (Creating a short URL):**
+```
+Client → POST /api/v1/urls → Load Balancer → URL Creation Service
+  → ID Generator (get unique 7-char code)
+  → Store {short_code, long_url, expires_at} in Cassandra
+  → Optionally cache in Redis
+  → Return short URL to client
+```
+
+**Read Path (Redirecting):**
+```
+Client → GET /abc1234 → Load Balancer → Redirect Service
+  → Check Redis Cache
+  → ✅ Cache Hit → 302 Redirect immediately
+  → ❌ Cache Miss → Query Cassandra → Cache result → 302 Redirect
+  → Async: publish ClickEvent to Kafka for analytics
+```
+
+> 🎯 **NFR addressed**: **Latency** — Redis cache hit path delivers < 10ms redirects. **Scalability** — 100:1 read-to-write ratio handled by cache-heavy architecture.
+
+---
+
+## Step 5 — High-level Design (~10 min)
+
+### 5.1 Architecture Diagram
 
 ```
                            ┌─────────────────────────────────────────────┐
@@ -217,27 +263,23 @@ user_id      BIGINT       NULL  (future)
                   └──────────────────────────────────────────────┘
 ```
 
-### Component Walkthrough
+### 5.2 Component Walkthrough
 
-**Write Path (Creating a short URL):**
-1. Client sends `POST /api/v1/urls` with long URL
-2. Load Balancer routes to **URL Creation Service**
-3. Creation Service calls **ID Generator** to get a unique 7-char code
-4. Stores `{short_code, long_url, expires_at}` in **Cassandra**
-5. Optionally caches the new mapping in **Redis**
-6. Returns short URL to client
+| Component | Role | Why This Choice |
+|---|---|---|
+| **Load Balancer** | Distributes traffic across service instances | Prevents single point of failure; enables horizontal scaling |
+| **URL Creation Service** | Handles short URL generation + storage | Separated from read path for independent scaling |
+| **Redirect Service** | Handles 302 redirects (read-heavy, 100:1) | Scales independently; stateless — add more instances for throughput |
+| **Redis Cache** | In-memory cache for hot URLs | Sub-millisecond lookups; 20% of URLs serve 80% of traffic (Pareto) |
+| **Cassandra** | Persistent storage for all URL mappings | Key-value access pattern, horizontal sharding, multi-DC replication |
+| **ID Generator** | Produces unique 7-char Base62 codes | Range-based KGS via ZooKeeper — no collision, no coordination overhead |
+| **Analytics Pipeline** | Kafka → Flink → ClickHouse | Decouples click tracking from redirect latency; handles 115K events/sec |
 
-**Read Path (Redirecting):**
-1. Client visits `tinyurl.com/abc1234`
-2. Load Balancer routes to **Redirect Service**
-3. Redirect Service checks **Redis Cache** first
-4. ✅ Cache Hit → immediately return `302 Redirect` to long URL
-5. ❌ Cache Miss → query **Cassandra**, cache the result, then redirect
-6. Asynchronously publish click event to **Kafka** for analytics
+> 🎯 **NFR addressed**: **Availability 99.99%** — no single point of failure; multi-DC Cassandra + Redis replicas. **Latency < 10ms** — Redis cache hit for hot URLs. **Scalability** — each component scales horizontally. **Durability** — Cassandra RF=3 across DCs.
 
 ---
 
-## SECTION 7 — Deep Dives (Scalability & Reliability)
+## Step 6 — Deep Dives (~15 min)
 
 ### Deep Dive 1: How to Generate Unique Short Codes?
 
@@ -320,15 +362,15 @@ This is often the trickiest part. There are 3 approaches:
 
 ---
 
-## SECTION 8 — Trade-offs & Alternatives
+### Trade-offs & Alternatives
 
-### CAP Theorem Position
+**CAP Theorem Position:**
 This system chooses **AP (Availability + Partition Tolerance)** over CP:
 - A redirect that returns stale data (old long URL) for a few milliseconds is acceptable
 - A redirect that fails entirely (returns 500) is NOT acceptable
 - Cassandra is AP by design — perfect fit
 
-### Key Trade-offs Table
+**Key Trade-offs Table:**
 
 | Decision | Choice Made | Alternative | Why Not Alternative? |
 |---|---|---|---|
@@ -338,25 +380,24 @@ This system chooses **AP (Availability + Partition Tolerance)** over CP:
 | Short Code | Base62 (7 chars) | Base10 | Base10 needs more chars for same cardinality |
 | Cache Eviction | LRU | LFU | LFU is complex; LRU works well for URL patterns |
 
-### What Would You Do Differently at Larger Scale?
+**What Would You Do Differently at Larger Scale?**
 - Add **CDN layer** (e.g., CloudFront) in front of Redirect Service — cache redirects at edge, sub-5ms globally
 - **Pre-warm cache** for known viral URLs (marketing campaigns)
 - **Geo-distributed** DB deployment with local reads for global users
 
 ---
 
-## Interview Flow Summary (Talk Track)
+### Summary Talk Track
 
 > Practice saying this out loud:
 
-1. "Let me start by asking a few clarifying questions..."  *(ask Section 1 questions)*
-2. "Based on that, here are my requirements..." *(walk Section 2)*
-3. "Let me do a quick back-of-envelope estimate..." *(Section 3 — show your math)*
-4. "I'll design the API first..." *(Section 4)*
-5. "For storage, I'd pick Cassandra because..." *(Section 5)*
-6. "Here's the overall architecture..." *(draw Section 6 diagram)*
-7. "The most interesting deep dive is ID generation..." *(Section 7, pick 2-3)*
-8. "The key trade-off here is 301 vs 302 and CP vs AP..." *(Section 8)*
+1. "Let me start by asking a few clarifying questions..." *(ask Step 1 questions)*
+2. "The core entity is a URL mapping — `short_code → long_url`. I'd use **Cassandra** for key-value lookups at scale."
+3. "The API is simple — POST to create, GET to redirect with a 302."
+4. "At 115K reads/sec, we need a **Redis cache** in front of Cassandra — hot URLs served in < 1ms."
+5. "Here's the overall architecture..." *(draw Step 5 diagram)*
+6. "The most interesting deep dive is **ID generation** — I'd use a Range-based KGS with ZooKeeper for collision-free, 7-char Base62 codes."
+7. "The key trade-off is **301 vs 302** for redirects and **AP over CP** since stale redirect data is acceptable but downtime is not."
 
 ---
 

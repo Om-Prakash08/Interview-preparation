@@ -5,466 +5,269 @@
 
 ---
 
-## SECTION 1 — Clarifying Questions (Ask These FIRST in Interview)
+## Step 1 — Requirements (~5 min)
 
-**Functional Scope:**
-- Full web search or domain-specific (only one site)?
-- Just text or also images, videos, news?
-- Do we need spell correction, query suggestions?
-- Ranking: by relevance only, or personalized?
-- Real-time indexing (minutes) or batch (days)?
+### 1.1 Clarifying Questions (Ask These FIRST)
+- Full web search or domain-specific search?
+- Text search only or multi-modal (images, video, news)?
+- Ranking criteria: relevance, page authority (PageRank), or personalization?
+- Freshness expectations for indexing new content vs breaking news?
+- Scale: expected daily search queries and web pages to index?
 
-**Scale:**
-- How many queries per day?
-- How many web pages to index?
+**Typical Interviewer Answer:** Full web text search. 8.5 Billion queries per day (100,000 queries/sec peak). Index of 60 Billion web pages. Ranking based on text relevance + PageRank authority. Latency target < 200ms.
 
-**Typical Interviewer Answer:**
-- Full web text search
-- 8.5 billion queries per day (Google's actual scale)
-- 60 billion web pages in the index
-- Ranking: relevance (not personalized for this design)
-- Near-real-time indexing for freshness (news in minutes, regular pages in days)
-- Spell correction and query autocomplete out of scope (covered in Q8)
+### 1.2 Functional Requirements (FR)
+1. Given a text query, return the top-10 most relevant web page results.
+2. Each result item includes title, URL, and a contextual text snippet.
+3. Support query operators: exact phrase matching (`"..."`) and exclusion (`-word`).
+4. Near-real-time indexing for breaking news (within minutes) and batch indexing for normal web pages.
+5. Rank documents based on term relevance (BM25) and link authority (PageRank).
 
----
-
-## SECTION 2 — Functional & Non-Functional Requirements
-
-### Functional Requirements
-1. Given a query string, return top-10 most relevant web pages
-2. Results include: title, URL, snippet (excerpt from page)
-3. Search results must be fresh (news indexed within minutes)
-4. Support basic query operators: phrase ("exact match"), exclusion (-word)
-5. Ranking by relevance + authority (PageRank-like)
-
-### Non-Functional Requirements
+### 1.3 Non-Functional Requirements (NFR)
 | Property | Target |
 |---|---|
-| **Query Latency** | < 200ms from query to results |
-| **Throughput** | 8.5B queries/day = ~100,000 queries/sec |
-| **Index size** | 60 billion pages |
-| **Freshness** | Breaking news indexed within 5 minutes |
-| **Availability** | 99.999% — Google must never be down |
+| **Query Latency** | $< 200\text{ms}$ p99 search response time |
+| **Throughput** | 8.5 Billion queries/day (~100,000 queries/sec peak) |
+| **Index Size** | 60 Billion documents (~200 TB compressed inverted index) |
+| **Freshness** | Breaking news indexed in $< 5\text{ minutes}$ |
+| **Availability** | 99.999% global availability |
 
-### Out of Scope
-- Image/video/news-specific search (separate systems)
-- Ad auction/monetization
-- Knowledge graph (featured snippets)
-- Query autocomplete (covered in Q8)
-
----
-
-## SECTION 3 — Capacity Estimation
-
-### Index Size
-- 60 billion pages × avg 10 KB text content = **600 TB** of raw text
-- Inverted index (compressed): ~1/3 of raw text = **~200 TB**
-- Distributed across thousands of index servers
-
-### Query Volume
-- 100,000 queries/sec
-- Each query touches multiple index shards → fan-out
-- Latency target: 200ms (8 seconds budget across the pipeline)
-
-### Crawling (input to indexing)
-- We already designed this in Q19 (Web Crawler)
-- 10,000 pages/sec → 864M pages/day → full refresh every ~2 months
+### 1.4 Out of Scope
+- Image / video / shopping tab vertical search
+- Query autocomplete (covered in separate design)
+- Knowledge graph entity cards
 
 ---
 
-## SECTION 4 — Core Data Structure: Inverted Index
+## Step 2 — Core Entities (~3 min)
 
-This is the most important concept for this question.
-
-### Forward Index vs Inverted Index
+### 2.1 Entity Identification
 
 ```
-Forward Index (how a document store works):
-  doc_id → { title, content, words: ["apple", "banana", "cherry"] }
-
-Inverted Index (how search engines work):
-  term → list of (doc_id, positions, frequency)
-
-Example corpus:
-  Doc 1: "The quick brown fox"
-  Doc 2: "The fox jumped"
-  Doc 3: "Quick brown rabbit"
-
-Inverted Index:
-  "the"    → [(1, [0], 1), (2, [0], 1)]       // term → [(doc_id, positions, freq)]
-  "quick"  → [(1, [1], 1), (3, [0], 1)]
-  "brown"  → [(1, [2], 1), (3, [1], 1)]
-  "fox"    → [(1, [3], 1), (2, [1], 1)]
-  "jumped" → [(2, [2], 1)]
-  "rabbit" → [(3, [2], 1)]
+┌──────────────────────────┐       ┌──────────────────────────┐
+│   Document Metadata      │       │   Posting List Entry     │
+│                          │       │                          │
+│  doc_id (64-bit int)     │       │  doc_id                  │
+│  url, title, snippet     │◄─────►│  term_frequency (TF)     │
+│  pagerank_score          │       │  positions [int array]   │
+└──────────────────────────┘       └────────────▲─────────────┘
+                                                │
+                                   ┌────────────┴─────────────┐
+                                   │   Inverted Index Term    │
+                                   │                          │
+                                   │  term (e.g. "google")    │
+                                   │  idf_score               │
+                                   └──────────────────────────┘
 ```
 
-**Posting List**: the list of (doc_id, ...) for each term.
+### 2.2 Data Model / Schema
 
+**1. Inverted Index Structure (In-Memory Posting Lists)**
 ```
-Storage of posting list for "fox":
-  Doc IDs: [1, 2] — stored as delta-encoded integers (difference from previous)
-  Delta encoding: [1, 1] (doc 1, then delta +1 for doc 2) → smaller numbers → better compression
-  Compressed with variable-byte encoding or PForDelta
+Term: "learning"
+Posting List: [
+  { doc_id: 101, tf: 5, positions: [12, 45, 88] },
+  { doc_id: 405, tf: 2, positions: [3, 109] }
+]
+-- Doc IDs stored using delta encoding [101, 304] to maximize compression efficiency.
+```
 
-  Positions stored separately (optional) for phrase matching:
-    "quick brown": both "quick" and "brown" must have consecutive positions
+**2. Document Metadata Store (Bigtable / RocksDB Key-Value)**
 ```
+Key: doc_id:101
+Value: {
+  "url": "https://en.wikipedia.org/wiki/Machine_learning",
+  "title": "Machine learning - Wikipedia",
+  "snippet": "Machine learning is a field of study...",
+  "pagerank": 8.92
+}
+```
+
+> 🎯 **NFR addressed**: **Query Latency < 200ms** — Inverted Index postings stored in memory or fast NVMe SSD with delta encoding for minimal RAM footprint.
 
 ---
 
-## SECTION 5 — API Design
+## Step 3 — API or Interface (~5 min)
 
-### 1. Search Query
+### 3.1 Web Search Query Interface
 ```
 GET /api/v1/search?q=machine+learning&start=0&num=10&lang=en
-
-Response 200:
+Response 200 OK:
 {
   "total_results": "About 4,180,000,000 results",
-  "search_time_sec": 0.14,
+  "search_time_sec": 0.12,
   "results": [
     {
       "rank": 1,
       "url": "https://en.wikipedia.org/wiki/Machine_learning",
       "title": "Machine learning - Wikipedia",
-      "snippet": "Machine learning (ML) is a field of inquiry devoted to understanding...",
-      "last_indexed": "2025-07-25T08:00:00Z"
+      "snippet": "Machine learning is a field of inquiry devoted to understanding...",
+      "last_indexed": "2026-09-06T12:00:00Z"
     }
   ]
 }
 ```
 
-### 2. Submit URL for Indexing (Webmaster tool)
+### 3.2 Real-time Index Ingestion API
 ```
 POST /api/v1/index/submit
-{ "url": "https://myblog.com/new-article" }
-→ 202 Accepted (URL queued for priority crawling)
+{ "url": "https://news.com/breaking-event", "priority": "HIGH" }
+```
+
+> 🎯 **NFR addressed**: **Throughput** — Query API is lightweight, with front-end edge caches handling top 1% query duplicates instantly.
+
+---
+
+## Step 4 — Data Flow (~3 min)
+
+### 4.1 Capacity Estimation
+
+- **Index Storage**: 60 Billion pages × 10 KB raw text = 600 TB raw text. Inverted index (~30% of text size) = **~200 TB compressed inverted index**.
+- **Query RPS**: 8.5B queries/day = **~100,000 queries/sec**.
+- **Fan-Out Load**: 100K RPS fan-out across 1,000 index shards = **100 Million sub-queries/sec** across the index fleet.
+
+### 4.2 Data Flow Through System
+
+```
+ONLINE QUERY SERVING PIPELINE (< 200ms)
+  User Query -> API Gateway -> Query Processor
+    ├─ 1. Tokenize, lowercase, stem terms ("running" -> "run")
+    ├─ 2. Expand synonyms & handle spelling correction
+    │
+    ▼
+  Index Coordinator Node (Fan-Out)
+    ├─ Broadcast query terms in parallel to Document Shard Fleet
+    ├─ Each shard evaluates posting lists: BM25 score = TF × IDF
+    ├─ Shards return their Top-K candidate doc_ids
+    │
+    ▼
+  Global Merger & Ranker
+    ├─ Merge candidate doc_ids from all shards
+    ├─ Compute Final Score = BM25_score × PageRank_score × Freshness_score
+    ├─ Sort candidates and pick Top 10
+    │
+    ▼
+  Snippet Generator & Document Metadata Lookup
+    ├─ Fetch title, URL, and dynamic contextual snippet from Metadata Store
+    └─ Return JSON response to User
+```
+
+> 🎯 **NFR addressed**: **Freshness** — Separate Real-time index tier ingests breaking news into memory in < 5 minutes without touching main disk index shards.
+
+---
+
+## Step 5 — High-level Design (~10 min)
+
+### 5.1 Architecture Diagram
+
+```
+                                  ┌───────────────────────────┐
+                                  │      User Browser / App   │
+                                  └─────────────┬─────────────┘
+                                                │ GET /search
+                                                ▼
+                                  ┌───────────────────────────┐
+                                  │    Query Processor Node   │
+                                  │  (Tokenize, Stem, Expand) │
+                                  └─────────────┬─────────────┘
+                                                │
+                                                ▼
+                                  ┌───────────────────────────┐
+                                  │    Search Coordinator     │
+                                  └──────┬─────────────┬──────┘
+                                         │ Parallel    │ Parallel
+                                         ▼ Fan-out     ▼ Fan-out
+┌───────────────────────────┐   ┌───────────────────────────┐   ┌───────────────────────────┐
+│ Real-Time Index Tier      │   │ Main Index Shard 1        │   │ Main Index Shard N        │
+│ (In-Memory, News < 5 min) │   │ (Doc IDs 0 - 1B)          │   │ (Doc IDs 59B - 60B)       │
+└─────────────┬─────────────┘   └─────────────┬─────────────┘   └─────────────┬─────────────┘
+              │                               │                               │
+              └───────────────────────┬───────┴───────────────────────────────┘
+                                      │ Top-K Candidates
+                                      ▼
+                        ┌───────────────────────────┐
+                        │   Scoring & Ranking Engine│
+                        │   BM25 + PageRank + ML    │
+                        └─────────────┬─────────────┘
+                                      │ Top 10 Doc IDs
+                                      ▼
+                        ┌───────────────────────────┐
+                        │   Metadata & Snippet Store│
+                        │   (Bigtable / RocksDB)    │
+                        └───────────────────────────┘
+```
+
+### 5.2 Component Walkthrough
+
+| Component | Role | Why This Choice |
+|---|---|---|
+| **Query Processor** | Normalizes query text | Stemming and spell check improve recall for search terms |
+| **Search Coordinator** | Handles query fan-out & merge | Coordinates parallel calls across 1,000 index shards |
+| **Inverted Index Shards**| Serves term postings | In-memory posting lists enable sub-millisecond term intersection |
+| **PageRank Engine** | Offline graph authority calculator | MapReduce job computes global link authority scores across web graph |
+| **Real-Time Index Tier**| Indexing breaking news | Handles high-write news stream without locking static main shards |
+
+> 🎯 **NFR addressed**: **Availability 99.999%** — Shard replication with 3 read-replicas per shard prevents single-node hardware failure from taking down search.
+
+---
+
+## Step 6 — Deep Dives (~15 min)
+
+### Deep Dive 1: Ranking Formula (BM25 + PageRank Integration)
+
+$$\text{Final Score}(q, d) = \sum_{t \in q} \text{BM25}(t, d) \times \log(\text{PageRank}(d) + 1) \times \text{Freshness}(d)$$
+
+1. **BM25 (Best Matching 25 - Text Relevance)**:
+   $$\text{BM25}(t, d) = \text{IDF}(t) \cdot \frac{\text{TF}(t, d) \cdot (k_1 + 1)}{\text{TF}(t, d) + k_1 \cdot \left(1 - b + b \cdot \frac{|d|}{\text{avgdl}}\right)}$$
+   - Prevents term frequency saturation (having 1,000 occurrences of a word doesn't make a page 1,000x more relevant).
+
+2. **PageRank (Global Link Authority)**:
+   $$\text{PR}(A) = (1 - d) + d \sum_{B \in \text{Inlinks}(A)} \frac{\text{PR}(B)}{\text{Outlinks}(B)}$$
+   - Calculated offline via Spark/MapReduce jobs over 60 Billion pages.
+
+---
+
+### Deep Dive 2: Index Sharding Strategy (Document-Based Sharding)
+
+**Why Document-Based Sharding (Partitioning by Doc ID):**
+```
+Document-Based Sharding:
+  - Shard 1 contains ALL terms for Doc IDs 0 to 1 Billion.
+  - Shard 2 contains ALL terms for Doc IDs 1 to 2 Billion.
+
+Query Execution:
+  - Search Coordinator sends query "machine learning" to ALL Shards in parallel.
+  - Each shard computes top candidates for its doc range.
+  - Coordinator merges local top candidates -> global top 10.
+  - Advantage: Adding new documents is trivial; no single term hotspot blocks a single machine.
 ```
 
 ---
 
-## SECTION 6 — High-Level Architecture
+### Deep Dive 3: Performance & Latency Optimization (< 200ms SLA)
 
-```
-THE SEARCH PIPELINE (Two phases: offline indexing + online serving)
-
-╔══════════════════════════════════════════════════════════════════════╗
-║                    OFFLINE INDEXING PIPELINE                        ║
-╚══════════════════════════════════════════════════════════════════════╝
-
-  Web Crawler (Q19 design)
-       │
-       │ Raw HTML pages (10K pages/sec)
-       ▼
-  Document Processing Pipeline:
-    ├─ HTML Parser: extract title, body text, meta tags, outlinks
-    ├─ Content Extractor: remove boilerplate (nav, footer), keep main content
-    ├─ Text Analyzer: tokenize, lowercase, remove stopwords, stem words
-    │    "Running quickly" → ["run", "quick"]
-    ├─ Spam/Duplicate Filter: remove scrapers, thin content
-    └─ Feature Extractor: anchor text from inlinks, PageRank score, freshness
-       │
-       ▼
-  Indexing Service:
-    ├─ Assigns numeric doc_id to each URL
-    ├─ Updates inverted index: for each term → append (doc_id, freq, positions)
-    └─ Stores document metadata (title, URL, snippet)
-       │
-       ▼
-  Distributed Index Store (1000s of shards across 1000s of servers)
-
-╔══════════════════════════════════════════════════════════════════════╗
-║                    ONLINE SERVING PIPELINE                          ║
-╚══════════════════════════════════════════════════════════════════════╝
-
-  User types query → DNS → Google Frontend Servers
-       │
-  ┌────▼──────────────────────────────────────────────────────────┐
-  │                    Query Processing                            │
-  │  1. Tokenize + normalize query: "Machine Learning" → ["machin", "learn"]
-  │  2. Identify query type: navigational? informational? transactional?
-  │  3. Expand query: synonyms, spelling correction
-  └────┬──────────────────────────────────────────────────────────┘
-       │
-  ┌────▼──────────────────────────────────────────────────────────┐
-  │                    Index Lookup (fan-out)                      │
-  │  Query Coordinator sends term lookups to multiple index shards │
-  │  in PARALLEL:                                                  │
-  │    Shard 1: "machine" posting list → [doc1, doc4, doc9, ...]  │
-  │    Shard 2: "learning" posting list → [doc2, doc4, doc7, ...] │
-  │    Shard 3: "machine" posting list → [doc10, doc20, ...]      │
-  │                    (different doc_id ranges per shard)        │
-  └────┬──────────────────────────────────────────────────────────┘
-       │ Fan-in: merge posting lists
-  ┌────▼──────────────────────────────────────────────────────────┐
-  │                    Scoring & Ranking                           │
-  │  For each candidate doc_id:                                   │
-  │    score = TF-IDF × PageRank × freshness × click_through_rate │
-  │  Sort by score, take top-100                                  │
-  └────┬──────────────────────────────────────────────────────────┘
-       │
-  ┌────▼──────────────────────────────────────────────────────────┐
-  │                    Result Serving                              │
-  │  Fetch doc metadata (title, URL, snippet) for top-10 results  │
-  │  Highlight query terms in snippet                             │
-  │  Return to user                                               │
-  └────────────────────────────────────────────────────────────────┘
-
-  ┌────────────────────────────────────────────────────────────────┐
-  │                INFRASTRUCTURE                                  │
-  │                                                                │
-  │  Index Shards: 60B docs / N docs_per_shard = thousands shards │
-  │  Each shard: in-memory posting lists + on-disk for large terms │
-  │  Replication: 3 replicas per shard (read replicas handle load) │
-  │  ZooKeeper: shard → server mapping                            │
-  └────────────────────────────────────────────────────────────────┘
-```
+1. **Result Caching (Redis)**: Top 1% of queries account for ~50% of traffic. Cache full SERP results in Redis with 1-hour TTL.
+2. **WAND (Weak AND) Algorithm**: Skip evaluating posting list documents whose upper-bound score cannot exceed the current $k$-th best candidate score. Yields 5x throughput boost.
+3. **Delta & Variable-Byte Encoding**: Compress posting list integer IDs ($[100, 102, 105] \rightarrow \Delta [100, 2, 3]$) to save 80% RAM.
 
 ---
 
-## SECTION 7 — Deep Dives
-
-### Deep Dive 1: Ranking — How Google Decides Order
-
-**Multiple ranking signals combined:**
-
-**1. TF-IDF (Term Frequency × Inverse Document Frequency)**
-```
-TF (term frequency): how often does "machine" appear in this doc?
-  TF("machine", doc_5) = count("machine" in doc_5) / total words in doc_5
-
-IDF (inverse doc frequency): how rare is "machine" across all docs?
-  IDF("machine") = log(total_docs / docs_containing("machine"))
-  → Common words ("the", "is") have low IDF → low weight
-  → Rare words ("BERT", "transformer") have high IDF → high weight
-
-TF-IDF = TF × IDF
-→ High score: term appears often in THIS doc but rarely in OTHERS = very relevant
-```
-
-**2. BM25 (Better Practical Variant of TF-IDF)**
-```
-BM25 addresses TF saturation (400 occurrences ≠ 4× better than 100):
-  BM25 = IDF × (TF × (k1 + 1)) / (TF + k1 × (1 - b + b × dl/avgdl))
-
-  k1 = 1.2 (saturation parameter)
-  b = 0.75 (length normalization)
-  dl = document length, avgdl = average document length
-
-→ Long documents don't unfairly dominate (length normalization)
-→ BM25 is the standard in Elasticsearch and most production search engines
-```
-
-**3. PageRank (Link-based Authority)**
-```
-Core insight: a page linked to by many authoritative pages is itself authoritative.
-
-Iterative formula:
-  PR(page_A) = (1 - d) + d × Σ (PR(page_B) / outlinks(page_B))
-  where B links to A, d = damping factor (0.85)
-
-Interpretation:
-  - Random web surfer: follows links with probability d, jumps to random page with (1-d)
-  - PR = probability that random surfer lands on this page
-  - Pages with high PR from authoritative sites (Wikipedia, .gov) rank higher
-
-PageRank computed offline (batch): runs on the entire web graph
-  Algorithm: MapReduce on 60B pages × their outlinks
-  Converges in ~50 iterations → runs on Hadoop/Spark
-```
-
-**4. Combined Scoring (simplified Google formula)**
-```
-final_score = 
-    α × BM25_text_score        // text relevance
-  + β × PageRank_score         // link authority
-  + γ × anchor_text_score      // text in links pointing to this page
-  + δ × freshness_score        // how recently was page updated?
-  + ε × click_through_rate     // do users click this result for this query?
-  + ζ × local_personalization  // user's location, language, history (optional)
-
-α, β, γ, δ, ε, ζ learned by ML (LambdaRank / LambdaMART)
-→ Gradient boosted trees trained on human-rated query-doc pairs
-```
-
----
-
-### Deep Dive 2: Index Sharding Strategy
-
-**60 billion documents → can't fit on one machine. How to shard?**
-
-**Strategy 1: Document-based sharding (range or hash)**
-```
-Assign doc_id ranges to shards:
-  Shard 0: doc_ids 0 to 1B
-  Shard 1: doc_ids 1B to 2B
-  ...
-  Shard 59: doc_ids 59B to 60B
-
-Query for "machine learning":
-  → Query ALL 60 shards in parallel
-  → Each shard returns its top-K results
-  → Merge all results → global top-K
-
-Pros: any shard can answer any query
-Cons: every query fans out to ALL shards (expensive at scale)
-```
-
-**Strategy 2: Term-based sharding**
-```
-Each shard owns specific terms:
-  Shard 0: terms "a" to "buzz"
-  Shard 1: terms "cable" to "fox"
-  ...
-
-Query for "machine learning":
-  → "machine" lives on Shard 15 → query Shard 15
-  → "learning" lives on Shard 22 → query Shard 22
-  → 2 shard queries (not 60) → much less fan-out
-
-Cons: merge step more complex; hot terms (common words) → hot shards
-Used by: Bing, Elasticsearch, Lucene
-```
-
-**Strategy 3: Hybrid (Google's approach)**
-```
-Combine document-based and term-based:
-  → Documents sharded by quality tier (high-PageRank docs on fast SSDs)
-  → Within a tier: term-based index for efficient lookup
-  → High-quality tier queried for all queries
-  → Low-quality tier queried only if high-quality tier has few results
-```
-
----
-
-### Deep Dive 3: Phrase Queries and Boolean Operators
-
-**"machine learning" (phrase query — must appear as a phrase, not just both words):**
-```
-Find docs containing "machine" at position p
-                  AND "learning" at position p+1
-
-Process:
-  1. Get posting list for "machine": [(doc1, [5,20,100]), (doc4, [12])]
-  2. Get posting list for "learning": [(doc1, [6,21]), (doc4, [45])]
-  3. Intersect doc_ids: doc1 appears in both
-  4. Check positions: doc1 has "machine" at [5,20,100] and "learning" at [6,21]
-     - Position 5 and 6: machine at 5, learning at 6 → consecutive! ✅
-     → doc1 matches the phrase
-```
-
-**machine learning -free (exclude "free"):**
-```
-1. Get posting list for "machine": [doc1, doc4, doc7, ...]
-2. Get posting list for "learning": [doc1, doc3, doc7, ...]
-3. Intersect: [doc1, doc7, ...]
-4. Get posting list for "free": [doc1, doc5, ...]
-5. Result - excluded: [doc7, ...]  (doc1 removed because it contains "free")
-```
-
----
-
-### Deep Dive 4: Near-Real-Time Indexing (Freshness)
-
-**Problem**: Breaking news (earthquake) should appear in search within minutes, not days.
-
-```
-Two-tier index:
-
-TIER 1: Real-time Index (small, fast)
-  - Contains last 24 hours of crawled pages
-  - In-memory inverted index
-  - Rebuilt every few minutes
-  - Priority: RSS feeds, news sites, sitemaps with recent timestamps
-  - 10s of millions of docs (tiny relative to full web)
-
-TIER 2: Main Index (huge, stable)
-  - Contains 60 billion pages
-  - Updated slowly (days to weeks for most pages)
-  - On-disk, optimized for throughput
-
-Query combines both:
-  → Query both tiers in parallel
-  → Merge results, prioritize recent for news queries
-  → If query contains time signals ("today", "latest", "breaking"):
-     → Weight real-time tier heavily
-
-Freshness signal in ranking:
-  freshness_score = 1.0 / (days_since_indexed + 1)
-  → Pages indexed today score 1.0
-  → Pages indexed 30 days ago score 0.033
-  → Weighted into final score (lower weight than BM25 for non-news queries)
-```
-
----
-
-### Deep Dive 5: Handling 100,000 Queries/sec with < 200ms Latency
-
-```
-Budget allocation (200ms total):
-  Query processing: 5ms
-  Index lookup (fan-out, parallel): 100ms
-  Ranking & scoring: 50ms
-  Result fetching + snippet generation: 30ms
-  Network (DNS, TLS, etc.): 15ms
-
-Key optimizations:
-
-1. Caching:
-   Most popular queries (top 1% = 50% of all queries)
-   → Cache results in Redis (TTL: 1 hour for stable queries, 5 min for news)
-   → Cache hit: ~1ms response (vs 200ms full processing)
-
-2. Index in RAM:
-   Hot index tier (most popular 1B docs) fully loaded into RAM across index servers
-   Cold tier: on NVMe SSD with memory-mapped files
-
-3. Early termination:
-   For high-traffic queries: stop merging posting lists after top-10,000 docs
-   (98% of the time, true top-10 are in first 10,000 candidates)
-
-4. WAND (Weak AND) algorithm:
-   Skip posting lists efficiently without full intersection
-   → Only compute score for docs that could possibly be in top-K
-   → 3-10× faster than full merge
-
-5. Geographic distribution:
-   Edge locations in every major city (Bangalore, Mumbai, Delhi, etc.)
-   User query → nearest Google datacenter (< 20ms network RTT)
-```
-
----
-
-## SECTION 8 — Trade-offs & Alternatives
-
-### CAP Theorem Position
-**AP (Availability + Partition Tolerance)**
-- Search with slightly stale index is better than no search at all
-- Google has 99.999% uptime — they accept AP and handle consistency with careful distributed design
-- Exception: real-time index tier is CP within its window (must show breaking news correctly)
-
-### Key Trade-offs Table
+### Trade-offs & Alternatives
 
 | Decision | Choice | Alternative | Reasoning |
 |---|---|---|---|
-| Index structure | Inverted index | B-Tree / full-text DB | Inverted index: O(1) term lookup; B-Tree needs full scan of table |
-| Ranking | BM25 + PageRank + ML blend | Pure PageRank | BM25 alone doesn't use link authority; PageRank alone ignores query relevance |
-| Sharding | Document-based | Term-based | Doc-based: simple, any shard can answer any query; term-based reduces fan-out but creates hot shards |
-| Freshness | Two-tier (real-time + main) | Single tier with incremental updates | Two-tier gives < 5 min freshness for news; single tier struggles with incremental at scale |
-| Caching | Query result caching (Redis) | No caching | Top 1% of queries = 50% of load; caching drastically reduces index server load |
+| **Index Layout** | Inverted Index | Relational / B-Tree DB | Inverted index gives $O(1)$ term lookup vs full table scans |
+| **Sharding** | Document-Based | Term-Based | Term-based creates hot shards for common words ("the", "weather") |
+| **Architecture** | Two-Tier (Real-time + Main) | Single-Tier Index | Real-time tier allows indexing news in minutes without expensive main index rebuilds |
 
 ---
 
-## Interview Flow Summary (Talk Track)
+### Summary Talk Track
 
-1. "Google Search has two phases: **offline indexing** (crawl → process → inverted index) and **online serving** (query → fan-out → rank → return)"
-2. "Core data structure: **Inverted Index** — term → posting list of (doc_id, positions, frequency)"
-3. "Ranking: **BM25** (text relevance) × **PageRank** (link authority) × **freshness** — weighted by learned ML model"
-4. "**PageRank**: iterative link-analysis algorithm — high PR from authoritative inlinks = trusted page"
-5. "**Sharding**: document-based → each query fans out to all shards in parallel, merge top-K"
-6. "**Latency**: 200ms budget — query result caching covers top-1% queries (50% of load)"
-7. "**Freshness**: two-tier index — real-time tier (24h, in-memory, minutes-fresh) + main index (60B docs, days-old)"
+1. "Google Search uses an **Inverted Index Architecture** divided into an offline indexing pipeline and online query serving."
+2. "To achieve **< 200ms latency** across **60 Billion documents**, we use document-based sharding and the **WAND algorithm** to prune weak candidates."
+3. "Ranking blends **BM25 text relevance** with offline **PageRank link authority**."
+4. "Freshness is solved via a **Two-Tier Index**: an in-memory Real-Time index for breaking news (< 5 min) alongside the main static index."
 
 ---
 

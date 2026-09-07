@@ -5,7 +5,9 @@
 
 ---
 
-## SECTION 1 — Clarifying Questions (Ask These FIRST in Interview)
+## Step 1 — Requirements (~5 min)
+
+### 1.1 Clarifying Questions (Ask These FIRST)
 
 **Functional Scope:**
 - Upload and download files — both?
@@ -29,11 +31,7 @@
 - File sharing: read-only or edit access
 - No real-time collaborative editing (that's Google Docs — different problem)
 
----
-
-## SECTION 2 — Functional & Non-Functional Requirements
-
-### Functional Requirements
+### 1.2 Functional Requirements (FR)
 1. Upload files of any type (up to 5 GB per file)
 2. Download files
 3. Sync files across multiple devices automatically
@@ -41,7 +39,7 @@
 5. Share files/folders with other users (view or edit)
 6. Folder hierarchy support
 
-### Non-Functional Requirements
+### 1.3 Non-Functional Requirements (NFR)
 | Property | Target |
 |---|---|
 | **Durability** | 99.999999999% (11 nines) — files must NEVER be lost |
@@ -50,40 +48,110 @@
 | **Scalability** | Petabytes to exabytes of storage |
 | **Bandwidth efficiency** | Only upload/download changed parts of files (delta sync) |
 
-### Out of Scope
+### 1.4 Out of Scope
 - Real-time collaborative editing
 - Photo/video auto-enhancement
 - Optical character recognition (OCR)
 
 ---
 
-## SECTION 3 — Capacity Estimation
+## Step 2 — Core Entities (~3 min)
 
-### Users & Storage
-- 500 million registered users
-- Average user uses 10 GB: 500M × 10 GB = **5 petabytes total storage**
-- Daily active: 50 million users upload/modify on average
+### 2.1 Entity Identification
 
-### Upload Volume
-- 50M users × 2 files modified/day × 500 KB average = **50 TB/day uploaded**
-- = 50 TB / 86,400 ≈ **~580 MB/s upload bandwidth**
+```
+┌──────────────┐        ┌──────────────┐        ┌──────────────┐
+│   File       │        │ FileVersion  │        │   Folder     │
+│              │        │              │        │              │
+│ file_id      │───────►│ file_id      │        │ folder_id    │
+│ owner_id     │        │ version_id   │        │ owner_id     │
+│ file_name    │        │ s3_key       │        │ parent_id    │
+│ folder_id    │        │ checksum     │        │ folder_name  │
+│ checksum     │        │ size_bytes   │        └──────────────┘
+│ current_ver  │        │ created_at   │
+└──────────────┘        └──────────────┘        ┌──────────────┐
+                                                │  FileShare   │
+┌──────────────┐                                │              │
+│  FileChunk   │                                │ file_id      │
+│              │                                │ shared_with  │
+│ file_id      │                                │ permission   │
+│ version_id   │                                │ expires_at   │
+│ chunk_index  │                                └──────────────┘
+│ chunk_hash   │
+│ s3_chunk_key │
+└──────────────┘
+```
 
-### Download Volume
-- Reads > Writes (10:1 ratio)
-- = **~5.8 GB/s download bandwidth**
+**Primary entities**: `File` (metadata), `FileVersion` (immutable version history), `FileChunk` (content-addressable parts for delta sync), `Folder` (hierarchy), `FileShare` (access control).
 
-### Metadata
-- 500M users × avg 1000 files = **500 billion file metadata records**
-- Each record: ~200 bytes → **~100 TB of metadata** (needs a scalable DB)
+### 2.2 Data Model / Schema
 
-### API QPS
-- 50M DAU × 20 operations/day / 86,400 ≈ **~11,500 API calls/sec**
+**Table 1: `files` (metadata)**
+```
+file_id          BIGINT       PRIMARY KEY
+owner_user_id    BIGINT
+file_name        VARCHAR(255)
+folder_id        BIGINT       NULL (null = root)
+size_bytes       BIGINT
+checksum_sha256  VARCHAR(64)  -- for deduplication and integrity
+current_version  INT          DEFAULT 1
+is_deleted       BOOLEAN      DEFAULT false
+created_at       TIMESTAMP
+updated_at       TIMESTAMP
+```
+**DB Choice**: **PostgreSQL** (relational, supports folder hierarchy queries, moderate scale)
+- Shard by `owner_user_id` when needed
+
+**Table 2: `file_versions`**
+```
+file_id          BIGINT
+version_id       INT
+size_bytes       BIGINT
+s3_key           TEXT         -- actual file location in S3
+checksum_sha256  VARCHAR(64)
+created_at       TIMESTAMP
+PRIMARY KEY (file_id, version_id DESC)
+```
+
+**Table 3: `file_chunks` (for delta sync)**
+```
+file_id          BIGINT
+version_id       INT
+chunk_index      INT
+chunk_hash       VARCHAR(64)  -- SHA256 of chunk content
+s3_chunk_key     TEXT
+PRIMARY KEY (file_id, version_id, chunk_index)
+```
+
+**Table 4: `folders`**
+```
+folder_id        BIGINT       PRIMARY KEY
+owner_user_id    BIGINT
+parent_folder_id BIGINT       NULL (null = root)
+folder_name      VARCHAR(255)
+```
+
+**Table 5: `file_shares`**
+```
+share_id         BIGINT       PRIMARY KEY
+file_id          BIGINT
+shared_with      BIGINT       -- user_id or group_id
+permission       ENUM('view', 'edit')
+expires_at       TIMESTAMP    NULL
+```
+
+**Blob Storage:**
+- Actual file content → **Amazon S3** (or Google Cloud Storage)
+- 11 nines durability, cross-region replication
+- Use S3 **Intelligent-Tiering**: hot files in S3 Standard, cold files automatically moved to S3 Glacier (80% cheaper)
+
+> 🎯 **NFR addressed**: **Durability 11 nines** — S3 for all file content with cross-region replication. **Bandwidth efficiency** — chunk-level storage enables delta sync (only transfer changed chunks). **Scalability** — PostgreSQL sharded by user_id + S3 for unlimited blob storage.
 
 ---
 
-## SECTION 4 — API Design
+## Step 3 — API or Interface (~5 min)
 
-### 1. Upload File (Chunked + Resumable)
+### 3.1 Upload File (Chunked + Resumable)
 ```
 // Step 1: Initiate upload session
 POST /api/v1/files/upload/init
@@ -106,19 +174,19 @@ POST /api/v1/files/upload/{upload_id}/complete
 Response: { "file_id": "file_123", "version_id": "v1" }
 ```
 
-### 2. Download File
+### 3.2 Download File
 ```
 GET /api/v1/files/{file_id}?version_id=v1
 → 302 Redirect to CDN/S3 pre-signed URL (valid for 15 minutes)
 ```
 
-### 3. List Files in Folder
+### 3.3 List Files in Folder
 ```
 GET /api/v1/folders/{folder_id}/contents
 Response: { "items": [ { file_object }, { folder_object } ] }
 ```
 
-### 4. Share File
+### 3.4 Share File
 ```
 POST /api/v1/files/{file_id}/share
 {
@@ -128,79 +196,66 @@ POST /api/v1/files/{file_id}/share
 Response: { "share_link": "https://drive.google.com/s/xyz" }
 ```
 
-### 5. Get File Versions
+### 3.5 Get File Versions
 ```
 GET /api/v1/files/{file_id}/versions
 Response: { "versions": [{ "version_id": "v3", "created_at": "...", "size": 102400 }] }
 ```
 
----
-
-## SECTION 5 — Data Model & Database Choice
-
-### Table 1: `files` (metadata)
-```
-file_id          BIGINT       PRIMARY KEY
-owner_user_id    BIGINT
-file_name        VARCHAR(255)
-folder_id        BIGINT       NULL (null = root)
-size_bytes       BIGINT
-checksum_sha256  VARCHAR(64)  -- for deduplication and integrity
-current_version  INT          DEFAULT 1
-is_deleted       BOOLEAN      DEFAULT false
-created_at       TIMESTAMP
-updated_at       TIMESTAMP
-```
-**DB Choice**: **PostgreSQL** (relational, supports folder hierarchy queries, moderate scale)
-- Shard by `owner_user_id` when needed
-
-### Table 2: `file_versions`
-```
-file_id          BIGINT
-version_id       INT
-size_bytes       BIGINT
-s3_key           TEXT         -- actual file location in S3
-checksum_sha256  VARCHAR(64)
-created_at       TIMESTAMP
-PRIMARY KEY (file_id, version_id DESC)
-```
-**DB Choice**: PostgreSQL (append-only, version history)
-
-### Table 3: `file_chunks` (for delta sync)
-```
-file_id          BIGINT
-version_id       INT
-chunk_index      INT
-chunk_hash       VARCHAR(64)  -- SHA256 of chunk content
-s3_chunk_key     TEXT
-PRIMARY KEY (file_id, version_id, chunk_index)
-```
-
-### Table 4: `folders`
-```
-folder_id        BIGINT       PRIMARY KEY
-owner_user_id    BIGINT
-parent_folder_id BIGINT       NULL (null = root)
-folder_name      VARCHAR(255)
-```
-
-### Table 5: `file_shares`
-```
-share_id         BIGINT       PRIMARY KEY
-file_id          BIGINT
-shared_with      BIGINT       -- user_id or group_id
-permission       ENUM('view', 'edit')
-expires_at       TIMESTAMP    NULL
-```
-
-### Blob Storage
-- Actual file content → **Amazon S3** (or Google Cloud Storage)
-- 11 nines durability, cross-region replication
-- Use S3 **Intelligent-Tiering**: hot files in S3 Standard, cold files automatically moved to S3 Glacier (80% cheaper)
+> 🎯 **NFR addressed**: **Availability** — resumable uploads survive network failures. **Bandwidth efficiency** — chunked upload enables delta sync. **Durability** — checksum verification on upload ensures integrity.
 
 ---
 
-## SECTION 6 — High-Level Architecture
+## Step 4 — Data Flow (~3 min)
+
+### 4.1 Capacity Estimation (Back-of-Envelope)
+
+**Users & Storage:**
+- 500 million registered users
+- Average user uses 10 GB: 500M × 10 GB = **5 petabytes total storage**
+- Daily active: 50 million users upload/modify on average
+
+**Upload Volume:**
+- 50M users × 2 files modified/day × 500 KB average = **50 TB/day uploaded**
+- = 50 TB / 86,400 ≈ **~580 MB/s upload bandwidth**
+
+**Download Volume:**
+- Reads > Writes (10:1 ratio)
+- = **~5.8 GB/s download bandwidth**
+
+**Metadata:**
+- 500M users × avg 1000 files = **500 billion file metadata records**
+- Each record: ~200 bytes → **~100 TB of metadata** (needs a scalable DB)
+
+**API QPS:**
+- 50M DAU × 20 operations/day / 86,400 ≈ **~11,500 API calls/sec**
+
+### 4.2 Data Flow Through System
+
+**Upload + Sync Flow:**
+```
+Desktop Client detects file change (OS file watcher)
+  → Compute diff (re-chunk, compare chunk hashes to previous version)
+  → Upload ONLY changed chunks → Upload Service → S3
+  → Update metadata DB (new version, new chunk references)
+  → Publish FileChangedEvent to Kafka
+  → Sync Service notifies all other devices (long polling / SSE)
+  → Devices pull changed chunks from S3 via CDN
+```
+
+**Download Flow:**
+```
+Client requests file → API → 302 Redirect to pre-signed CDN/S3 URL
+  → CDN serves from edge cache (hit) or S3 origin (miss)
+```
+
+> 🎯 **NFR addressed**: **Sync latency < 30s** — Kafka + long polling/SSE for instant device notifications. **Bandwidth efficiency** — only changed chunks uploaded/downloaded via delta sync.
+
+---
+
+## Step 5 — High-level Design (~10 min)
+
+### 5.1 Architecture Diagram
 
 ```
                     ┌──────────────────────────────────────────────────┐
@@ -248,9 +303,23 @@ expires_at       TIMESTAMP    NULL
  └────────────────────────────────────────┘
 ```
 
+### 5.2 Component Walkthrough
+
+| Component | Role | Why This Choice |
+|---|---|---|
+| **Upload Service** | Handles chunked resumable uploads to S3 | Stateless; supports delta sync by accepting individual chunks |
+| **Download Service** | Generates pre-signed S3/CDN URLs | Short-lived URLs for security; CDN offloads bandwidth |
+| **Metadata Service** | CRUD for files, folders, versions, shares | PostgreSQL for relational file hierarchy |
+| **S3** | Stores all file chunks and versions | 11 nines durability; cost-effective at petabyte scale |
+| **CDN** | Edge caches popular downloads | Reduces S3 egress costs; lower download latency globally |
+| **Kafka** | Event bus for sync notifications | Durable; enables real-time sync across devices |
+| **Dedup Store** | Content-addressable chunk → S3 key mapping | Avoids storing duplicate content across users |
+
+> 🎯 **NFR addressed**: **Durability** — S3 + cross-region replication. **Availability 99.99%** — CDN for reads, multiple upload service instances. **Sync latency < 30s** — Kafka → SSE push to all devices. **Scalability** — S3 for unlimited storage, PostgreSQL sharded by user_id.
+
 ---
 
-## SECTION 7 — Deep Dives
+## Step 6 — Deep Dives (~15 min)
 
 ### Deep Dive 1: Chunking & Delta Sync (The Core Innovation)
 
@@ -344,14 +413,14 @@ For 5 petabytes: savings can be **tens of millions of dollars/year**.
 
 ---
 
-## SECTION 8 — Trade-offs & Alternatives
+### Trade-offs & Alternatives
 
-### CAP Theorem Position
+**CAP Theorem Position:**
 **CP (Consistency + Partition Tolerance)** for file operations:
 - File system semantics require consistency — if you upload a file, you must be able to download the same file immediately
 - Slight availability trade-off is acceptable (show upload error rather than silently losing data)
 
-### Key Trade-offs Table
+**Key Trade-offs Table:**
 
 | Decision | Choice | Alternative | Reasoning |
 |---|---|---|---|
@@ -361,7 +430,7 @@ For 5 petabytes: savings can be **tens of millions of dollars/year**.
 | Metadata DB | PostgreSQL | Cassandra | Files/folders are relational by nature; Cassandra doesn't support hierarchical queries well |
 | Sync notification | Long polling / SSE | WebSocket | Long polling/SSE is simpler for one-way server→client pushes; WebSocket is overkill here |
 
-### What Would You Do Differently at Larger Scale?
+**What Would You Do Differently at Larger Scale?**
 - **Global distribution**: replicate user's files to the nearest regional S3 bucket for faster access
 - **Preview generation**: async pipeline to generate PDF thumbnails, image previews
 - **Virus scanning**: every upload goes through ClamAV / VirusTotal before being made accessible
@@ -369,16 +438,16 @@ For 5 petabytes: savings can be **tens of millions of dollars/year**.
 
 ---
 
-## Interview Flow Summary (Talk Track)
+### Summary Talk Track
 
-1. "Google Drive's core challenge is **efficient sync across devices** without re-uploading entire files"
-2. "The key insight: **content-defined chunking + delta sync** — only transfer changed chunks"
-3. "Deduplication: chunks are content-addressed (SHA-256 hash). Same content → same S3 object, never stored twice"
-4. "File metadata in PostgreSQL, actual file chunks in S3 with 11 nines durability"
-5. "Sync pipeline: file change → Kafka event → all devices notified via long polling → pull changed chunks"
-6. "Versioning: every save = new version. Restore = pointer update. GC handles orphaned chunks"
-7. "Conflict resolution: create conflict copies — never silently lose user data"
-8. "CAP choice: CP — consistency is essential for a file system"
+1. "Google Drive's core challenge is **efficient sync across devices** without re-uploading entire files."
+2. "Core entities: **File**, **FileVersion**, **FileChunk** — chunks are the unit of storage and transfer."
+3. "The key insight: **content-defined chunking + delta sync** — only transfer changed chunks."
+4. "Deduplication: chunks are content-addressed (SHA-256 hash). Same content → same S3 object, never stored twice."
+5. "File metadata in PostgreSQL, actual file chunks in S3 with 11 nines durability."
+6. "Sync pipeline: file change → Kafka event → all devices notified via long polling → pull changed chunks."
+7. "Versioning: every save = new version. Restore = pointer update. GC handles orphaned chunks."
+8. "CAP choice: **CP** — consistency is essential for a file system."
 
 ---
 
